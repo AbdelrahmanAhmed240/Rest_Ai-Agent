@@ -1,0 +1,284 @@
+﻿{% extends "base.html" %}
+
+{% block title %}Dashboard Overview - Restaurant Admin{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2 class="fw-bold mb-1"><i class="bi bi-speedometer2 text-primary me-2"></i>Admin Dashboard</h2>
+        <p class="text-muted">Overview of restaurant operations, live orders, customers, and dynamic RAG knowledge base.</p>
+    </div>
+</div>
+
+<!-- Metric Stat Cards -->
+<div class="row g-3 mb-4">
+    <div class="col-md-4 col-lg-2">
+        <div class="card stat-card bg-white p-3 border-start border-primary border-4">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="text-muted small">Products</span>
+                    <h3 class="fw-bold my-1">{{ total_products }}</h3>
+                </div>
+                <div class="fs-1 text-primary"><i class="bi bi-egg-fried"></i></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4 col-lg-2">
+        <div class="card stat-card bg-white p-3 border-start border-success border-4">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="text-muted small">Orders</span>
+                    <h3 class="fw-bold my-1">{{ total_orders }}</h3>
+                </div>
+                <div class="fs-1 text-success"><i class="bi bi-receipt"></i></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4 col-lg-2">
+        <div class="card stat-card bg-white p-3 border-start border-info border-4">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="text-muted small">Customers</span>
+                    <h3 class="fw-bold my-1">{{ total_customers }}</h3>
+                </div>
+                <div class="fs-1 text-info"><i class="bi bi-people"></i></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4 col-lg-3">
+        <div class="card stat-card bg-white p-3 border-start border-danger border-4">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="text-muted small">RAG Articles</span>
+                    <h3 class="fw-bold my-1">{{ total_knowledge }}</h3>
+                </div>
+                <div class="fs-1 text-danger"><i class="bi bi-database-gear"></i></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Orders Section -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                <h5 class="mb-0 fw-bold"><i class="bi bi-clock-history me-2 text-primary"></i>Recent Live Orders</h5>
+                <span class="badge bg-primary">Auto-Updated from DB</span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Order Code</th>
+                                <th>Customer</th>
+                                <th>Phone</th>
+                                <th>Items</th>
+                                <th>Type & Destination</th>
+                                <th>Payment</th>
+                                <th>Total</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for order in recent_orders %}
+                            <tr>
+                                <td class="fw-bold text-primary">{{ order.order_code }}</td>
+                                <td>{{ order.customer.name }}</td>
+                                <td><code>{{ order.customer.phone }}</code></td>
+                                <td class="small">{{ order.items_summary() }}</td>
+                                <td>
+                                    {% if order.order_type == 'delivery' %}
+                                        <span class="badge bg-primary mb-1"><i class="bi bi-truck me-1"></i>Delivery</span>
+                                        <div class="small text-muted">{{ order.delivery_address or 'No address' }}</div>
+                                    {% elif order.order_type == 'pickup' %}
+                                        <span class="badge bg-dark mb-1"><i class="bi bi-shop me-1"></i>Pickup</span>
+                                        <div class="small text-muted">{{ order.pickup_branch or 'Main Branch' }}</div>
+                                    {% elif order.order_type == 'dine_in' %}
+                                        <span class="badge bg-success mb-1"><i class="bi bi-cup-hot me-1"></i>Dine-in</span>
+                                        <div class="small text-muted">Table {{ order.table_number or 'N/A' }}</div>
+                                    {% else %}
+                                        <span class="badge bg-secondary mb-1">{{ order.order_type }}</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <span class="badge bg-dark">{{ order.payment_method }}</span>
+                                </td>
+                                <td class="fw-bold text-success">{{ order.total_price }} EGP</td>
+                                <td>
+                                    {% if order.status == 'In Kitchen' %}
+                                        <span class="badge bg-warning text-dark"><i class="bi bi-fire me-1"></i>In Kitchen</span>
+                                    {% elif order.status == 'Delivered' %}
+                                        <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Delivered</span>
+                                    {% else %}
+                                        <span class="badge bg-danger">{{ order.status }}</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-muted small">{{ order.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="9" class="text-center py-4 text-muted">No orders found. Run seed.py or place an order via the AI Agent.</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Agent Test Chat -->
+<div class="row mt-4" id="chat">
+    <div class="col-md-10 col-lg-8 mx-auto">
+        <div class="card">
+            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                <h5 class="mb-0 fw-bold"><i class="bi bi-robot me-2 text-warning"></i>Agent Test Chat</h5>
+                <span class="badge bg-warning text-dark">Simple testing interface</span>
+            </div>
+            <div class="card-body">
+                <div id="agent-messages" class="border rounded p-3 mb-3" style="min-height: 220px; max-height: 320px; overflow-y: auto; background: #fafafa;">
+                    <div class="text-muted small">Start a conversation to test the basic agent.</div>
+                </div>
+                <form id="agent-chat-form" class="d-flex gap-2">
+                    <input type="text" id="agent-message" class="form-control" placeholder="Type a message..." required>
+                    <input type="hidden" id="agent-session-id" value="agent_test_session">
+                    <button type="submit" class="btn btn-warning fw-semibold" id="agent-send-btn">Send</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+(function() {
+    var form = document.getElementById('agent-chat-form');
+    var input = document.getElementById('agent-message');
+    var sessionInput = document.getElementById('agent-session-id');
+    var container = document.getElementById('agent-messages');
+    var sendBtn = document.getElementById('agent-send-btn');
+
+    var busy = false;
+    var currentController = null;
+
+    function appendMessage(role, text) {
+        var wrapper = document.createElement('div');
+        wrapper.className = 'mb-2';
+        var label = document.createElement('div');
+        label.className = 'small fw-semibold ' + (role === 'user' ? 'text-primary' : 'text-dark');
+        label.textContent = role === 'user' ? 'You' : 'Agent';
+        var bubble = document.createElement('div');
+        bubble.className = 'p-2 rounded ' + (role === 'user' ? 'bg-primary text-white' : 'bg-white border');
+        bubble.textContent = text;
+        wrapper.appendChild(label);
+        wrapper.appendChild(bubble);
+        container.appendChild(wrapper);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function showTypingIndicator() {
+        var wrapper = document.createElement('div');
+        wrapper.id = 'agent-typing';
+        wrapper.className = 'mb-2';
+        var label = document.createElement('div');
+        label.className = 'small fw-semibold text-dark';
+        label.textContent = 'Agent';
+        var bubble = document.createElement('div');
+        bubble.className = 'p-2 rounded bg-white border';
+        bubble.innerHTML = '<span class="spinner-border spinner-border-sm text-warning" role="status"></span>&nbsp;Typing...';
+        wrapper.appendChild(label);
+        wrapper.appendChild(bubble);
+        container.appendChild(wrapper);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function removeTypingIndicator() {
+        var el = document.getElementById('agent-typing');
+        if (el) el.remove();
+    }
+
+    form.addEventListener('submit', function(event) {
+        event.preventDefault();
+        if (busy) return;
+        var message = input.value.trim();
+        if (!message) return;
+
+        busy = true;
+        input.disabled = true;
+        input.placeholder = 'Waiting for response...';
+        sendBtn.disabled = true;
+        sendBtn.textContent = 'Sending...';
+
+        appendMessage('user', message);
+        input.value = '';
+        showTypingIndicator();
+
+        var controller = new AbortController();
+        currentController = controller;
+
+        var timeout = setTimeout(function() {
+            if (currentController === controller) {
+                controller.abort();
+            }
+        }, 120000); // 120s timeout for free-tier LLM
+
+        fetch('/agent/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                session_id: sessionInput.value || 'agent_test_session',
+                message: message
+            }),
+            signal: controller.signal
+        })
+        .then(function(res) {
+            if (!res.ok) {
+                throw new Error('HTTP error ' + res.status);
+            }
+            return res.json();
+        })
+        .then(function(data) {
+            clearTimeout(timeout);
+            removeTypingIndicator();
+            if (data.error) {
+                appendMessage('agent', 'Error: ' + data.error);
+            } else if (data.message) {
+                appendMessage('agent', data.message);
+            } else {
+                appendMessage('agent', '(No response received)');
+            }
+        })
+        .catch(function(err) {
+            clearTimeout(timeout);
+            removeTypingIndicator();
+            if (err.name === 'AbortError') {
+                appendMessage('agent', 'Request timed out. Please try again.');
+            } else {
+                appendMessage('agent', 'Request failed: ' + err.message);
+            }
+        })
+        .finally(function() {
+            busy = false;
+            input.disabled = false;
+            input.placeholder = 'Type a message...';
+            sendBtn.disabled = false;
+            sendBtn.textContent = 'Send';
+            currentController = null;
+            container.scrollTop = container.scrollHeight;
+        });
+    });
+
+    input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && busy) {
+            e.preventDefault();
+        }
+    });
+})();
+</script>
+{% endblock %}
