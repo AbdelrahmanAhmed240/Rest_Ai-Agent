@@ -1,6 +1,7 @@
+from datetime import datetime
 from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify
-from app.models import db, Product, Customer, Order, OrderItem, KnowledgeItem
-from app.services.agent import reply as agent_reply, get_history as agent_get_history
+from app.models import db, Product, Customer, Order, KnowledgeItem, ChatSession, ChatMessage
+from app.services.agent import get_history as agent_get_history
 from app.services.graph import run as graph_run
 
 admin_bp = Blueprint("admin", __name__)
@@ -51,7 +52,6 @@ def products():
         search_query=query,
     )
 
-
 @admin_bp.route("/products/new", methods=["GET", "POST"])
 def new_product():
     """Create a new product."""
@@ -94,7 +94,6 @@ def new_product():
         categories=["Meals", "Sandwiches", "Combos", "Add-ons", "Drinks", "Sides"],
     )
 
-
 @admin_bp.route("/products/edit/<int:product_id>", methods=["GET", "POST"])
 def edit_product(product_id):
     """Edit an existing product."""
@@ -135,7 +134,6 @@ def edit_product(product_id):
         product=product,
     )
 
-
 @admin_bp.route("/products/delete/<int:product_id>", methods=["POST"])
 def delete_product(product_id):
     """Delete a product permanently."""
@@ -149,7 +147,6 @@ def delete_product(product_id):
         db.session.rollback()
         flash(f"Failed to delete product: {exc}", "error")
     return redirect(url_for("admin.products"))
-
 
 @admin_bp.route("/products/toggle/<int:product_id>", methods=["POST"])
 def toggle_product_availability(product_id):
@@ -165,24 +162,63 @@ def toggle_product_availability(product_id):
 @admin_bp.route("/orders")
 def orders():
     """Lists all customer orders with filter for order type and status."""
-    order_type = request.args.get("type", "")
-    status = request.args.get("status", "")
+    raw_type = request.args.get("type", "").strip()
+    status = request.args.get("status", "").strip()
 
     orders_query = Order.query.order_by(Order.created_at.desc())
 
-    if order_type:
-        orders_query = orders_query.filter_by(order_type=order_type)
+    if raw_type:
+        # Normalize: 'Delivery' -> 'delivery', 'Pickup' -> 'pickup', 'Dine-in'/'dine_in' -> 'dine_in'
+        t_lower = raw_type.lower().replace("-", "_")
+        orders_query = orders_query.filter(
+            db.or_(
+                Order.order_type == raw_type,
+                Order.order_type == t_lower,
+                Order.order_type.ilike(t_lower)
+            )
+        )
     if status:
-        orders_query = orders_query.filter_by(status=status)
+        orders_query = orders_query.filter(Order.status.ilike(status))
 
     all_orders = orders_query.all()
 
     return render_template(
         "orders.html",
         orders=all_orders,
-        selected_type=order_type,
+        selected_type=raw_type,
         selected_status=status,
     )
+
+@admin_bp.route("/orders/status/<int:order_id>", methods=["POST"])
+def update_order_status(order_id):
+    """Update order status (In Kitchen, Ready, Delivered, Cancelled)."""
+    order = db.get_or_404(Order, order_id)
+    new_status = request.form.get("status", "").strip()
+    valid_statuses = ["In Kitchen", "Ready", "Delivered", "Cancelled"]
+    if new_status in valid_statuses:
+        order.status = new_status
+        db.session.commit()
+        flash(f"Order {order.order_code} status updated to {new_status}.", "success")
+    else:
+        flash(f"Invalid status '{new_status}'. Allowed statuses: {', '.join(valid_statuses)}.", "error")
+    return redirect(url_for("admin.orders"))
+
+@admin_bp.route("/orders/delete/<int:order_id>", methods=["POST"])
+def delete_order(order_id):
+    """
+    Safely delete an order permanently after explicit administrator confirmation.
+    Preserves referential integrity and does not delete related customer records.
+    """
+    order = db.get_or_404(Order, order_id)
+    code = order.order_code
+    try:
+        db.session.delete(order)
+        db.session.commit()
+        flash(f"Order {code} has been deleted permanently.", "success")
+    except Exception as exc:
+        db.session.rollback()
+        flash(f"Failed to delete order {code}: {exc}", "error")
+    return redirect(url_for("admin.orders"))
 
 # Customers View
 @admin_bp.route("/customers")
@@ -191,11 +227,36 @@ def customers():
     all_customers = Customer.query.order_by(Customer.created_at.desc()).all()
     return render_template("customers.html", customers=all_customers)
 
+@admin_bp.route("/customers/delete/<int:customer_id>", methods=["POST"])
+def delete_customer(customer_id):
+    """
+    Safely delete a customer after explicit administrator confirmation.
+    PRESERVES HISTORICAL ORDERS: Any historical orders belonging to this customer
+    have their customer_id detached (set to NULL) while customer_name, customer_phone,
+    address, order totals, items, and status remain safely preserved on the orders.
+    """
+    customer = db.get_or_404(Customer, customer_id)
+    cust_name = customer.name or customer.phone
+    try:
+        # Preserve historical orders before deleting the customer record
+        for ord_record in customer.orders:
+            ord_record.customer_id = None
+            if not ord_record.customer_name:
+                ord_record.customer_name = customer.name
+            if not ord_record.customer_phone:
+                ord_record.customer_phone = customer.phone
+
+        db.session.delete(customer)
+        db.session.commit()
+        flash(f"Customer '{cust_name}' has been deleted. Historical orders were safely preserved.", "success")
+    except Exception as exc:
+        db.session.rollback()
+        flash(f"Failed to delete customer '{cust_name}': {exc}", "error")
+    return redirect(url_for("admin.customers"))
+
 # RAG Knowledge Management
-from sqlalchemy.exc import IntegrityError
 from app.models import KnowledgeItem
-from app.services.knowledge_sync import create_item_from_dashboard, create_markdown_source_from_admin, delete_item_from_dashboard, sync_all, update_item_from_dashboard, _KNOWLEDGE_DIR, _write_markdown, _reindex_markdown
-from app.services.vector_store import retrieve
+from app.services.knowledge_sync import create_markdown_source_from_admin, delete_item_from_dashboard, sync_all, _KNOWLEDGE_DIR, _write_markdown, _reindex_markdown
 
 # Displays RAG knowledge chunks and provides filtering/search for the knowledge dashboard.
 @admin_bp.route("/knowledge")
@@ -348,29 +409,6 @@ def create_knowledge_markdown():
         categories=["General", "Hours", "Branches", "Policies", "Offers", "Menu", "Delivery"],
     )
 
-    if request.method == "POST":
-        title = request.form.get("title", "").strip()
-        category = request.form.get("category", "General")
-        content = request.form.get("content", "")
-        if not title or not content:
-            flash("Title and content are required.", "error")
-            return redirect(url_for("admin.create_knowledge"))
-
-        try:
-            item = create_item_from_dashboard(
-                title=title,
-                category=category,
-                content=content,
-            )
-        except Exception:
-            flash("Failed to create knowledge item.", "error")
-            return redirect(url_for("admin.create_knowledge"))
-
-        flash("Knowledge item created successfully.", "success")
-        return redirect(url_for("admin.knowledge"))
-
-    return render_template("knowledge_form.html", item=None, categories=["General", "Hours", "Branches", "Policies", "Offers"])
-
 # Deletes a knowledge item from the database and vector store.
 @admin_bp.route("/knowledge/delete/<int:item_id>", methods=["POST"])
 def delete_knowledge(item_id):
@@ -390,18 +428,99 @@ def sync_markdown():
     try:
         sync_all()
         flash("Markdown knowledge synchronized to database and vector store.", "success")
-    except Exception:
-        flash("Markdown sync failed.", "error")
+    except Exception as exc:
+        flash(f"Markdown sync failed: {exc}", "error")
     return redirect(url_for("admin.knowledge"))
+
+# Rebuilds the ChromaDB vector index completely (useful when migrating embedding models).
+@admin_bp.route("/knowledge/rebuild-vectors", methods=["POST"])
+def rebuild_vectors():
+    try:
+        from app.services.knowledge_sync import rebuild_vector_index
+        count = rebuild_vector_index()
+        flash(f"Vector index rebuilt successfully with {count} chunks indexed.", "success")
+    except Exception as exc:
+        flash(f"Vector rebuild failed: {exc}", "error")
+    return redirect(url_for("admin.knowledge"))
+
+def normalize_chat_markdown(text: str) -> str:
+    """Ensure markdown is clean, unescaped, and properly formatted with block breaks."""
+    if not text:
+        return ""
+    import re
+    t = text.strip()
+    if "\\n" in t and "\n" not in t:
+        t = t.replace("\\n", "\n")
+    # Protect code blocks
+    code_blocks = []
+    def _save_cb(m):
+        code_blocks.append(m.group(0))
+        return f"__CODE_BLOCK_{len(code_blocks)-1}__"
+
+    t = re.sub(r"```[\s\S]*?```", _save_cb, t)
+    t = re.sub(r"`[^`\n]+`", _save_cb, t)
+
+    # Strip backslash escapes on markdown punctuation
+    t = re.sub(r"\\+([#*_\-\[\]\(\)])", r"\1", t)
+
+    # Insert newlines before headings if not at start of line
+    t = re.sub(r"([^\n])\s+(#{2,6}\s+)", r"\1\n\n\2", t)
+    # Insert newlines after headings if followed immediately by product/text
+    t = re.sub(r"(#{2,6}\s+[^\n]+?)\s+(\*\*[^*\n]+?\*\*)", r"\1\n\n\2", t)
+    # Insert newlines before bold product entries
+    t = re.sub(r"([^\n])\s+(\*\*[^*\n]+?(?:—|-|:)[^*\n]+?\*\*)", r"\1\n\n\2", t)
+    # Insert newlines before bullet items
+    t = re.sub(r"([^\n])\s+([*\-]\s+)", r"\1\n\2", t)
+
+    # Restore code blocks
+    for i, cb in enumerate(code_blocks):
+        t = t.replace(f"__CODE_BLOCK_{i}__", cb)
+
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+def _render_chat_markdown(text: str) -> str:
+    """Render markdown into clean, sanitized HTML for chat display.
+    Disables raw HTML tags to prevent XSS attacks while preserving all styling.
+    """
+    if not text:
+        return ""
+    cleaned_text = normalize_chat_markdown(text)
+    try:
+        import markdown_it
+        md = markdown_it.MarkdownIt("commonmark", {"html": False, "breaks": True})
+        return md.render(cleaned_text)
+    except Exception:
+        import html
+        return html.escape(cleaned_text).replace("\n", "<br>")
 
 # Sends a user message through the LangGraph AI agent and returns its response.
 @admin_bp.route("/agent/chat", methods=["POST"])
 def agent_chat():
     data = request.get_json(silent=True) or {}
-    session_id = str(data.get("session_id", "default"))
+    session_id = str(data.get("session_id", "default")).strip()
     message = str(data.get("message", "")).strip()
     if not message:
         return jsonify({"error": "message is required"}), 400
+
+    # Ensure ChatSession exists in DB
+    chat_sess = ChatSession.query.filter_by(session_id=session_id).first()
+    if not chat_sess:
+        # Determine automatic sequential numbering e.g. "Chat 1", "Chat 2"
+        existing_count = ChatSession.query.count()
+        chat_sess = ChatSession(session_id=session_id, title=f"Chat {existing_count + 1}")
+        db.session.add(chat_sess)
+        db.session.commit()
+
+    # Persist user message to SQLite
+    user_msg_record = ChatMessage(
+        session_id=session_id,
+        role="user",
+        content=message,
+        html_content=None,
+    )
+    db.session.add(user_msg_record)
+    db.session.commit()
 
     try:
         result = graph_run(session_id=session_id, message=message)
@@ -410,11 +529,99 @@ def agent_chat():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
+    reply_html = _render_chat_markdown(reply_text)
+
+    # Persist assistant message to SQLite
+    assistant_msg_record = ChatMessage(
+        session_id=session_id,
+        role="assistant",
+        content=reply_text,
+        html_content=reply_html,
+    )
+    db.session.add(assistant_msg_record)
+    chat_sess.updated_at = db.func.now()
+    db.session.commit()
+
     return jsonify({
         "session_id": session_id,
         "message": reply_text,
+        "html": reply_html,
         "intent": intent,
         "tool_name": result.get("tool_name"),
         "tool_result": result.get("tool_result"),
         "history_length": len(agent_get_history(session_id)),
     })
+
+@admin_bp.route("/agent/sessions", methods=["GET"])
+def get_chat_sessions():
+    """Retrieve all persisted chat sessions ordered with most recent first."""
+    sessions = ChatSession.query.order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc()).all()
+    # If no sessions exist yet, create Chat 1 automatically
+    if not sessions:
+        import uuid
+        init_id = f"chat_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:5]}"
+        first_sess = ChatSession(session_id=init_id, title="Chat 1")
+        db.session.add(first_sess)
+        db.session.commit()
+        sessions = [first_sess]
+    return jsonify([s.to_dict() for s in sessions])
+
+@admin_bp.route("/agent/sessions", methods=["POST"])
+def create_chat_session():
+    """Create a new independent named chat session (e.g. Chat 1, Chat 2...)."""
+    import uuid
+    data = request.get_json(silent=True) or {}
+    existing_count = ChatSession.query.count()
+    custom_title = data.get("title", "").strip() or f"Chat {existing_count + 1}"
+    new_id = f"chat_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:5]}"
+    new_sess = ChatSession(session_id=new_id, title=custom_title)
+    db.session.add(new_sess)
+    db.session.commit()
+    return jsonify(new_sess.to_dict()), 201
+
+@admin_bp.route("/agent/sessions/<session_id>/messages", methods=["GET"])
+def get_session_messages(session_id):
+    """Retrieve all messages belonging to a chat session in chronological order."""
+    sess = ChatSession.query.filter_by(session_id=session_id).first()
+    if not sess:
+        return jsonify({"error": "Session not found"}), 404
+    msgs = [m.to_dict() for m in sess.messages]
+    return jsonify({"session": sess.to_dict(), "messages": msgs})
+
+@admin_bp.route("/agent/sessions/<session_id>/rename", methods=["POST"])
+def rename_chat_session(session_id):
+    """Rename a chat session without changing its history or identifier."""
+    data = request.get_json(silent=True) or {}
+    new_title = data.get("title", "").strip()
+    if not new_title:
+        return jsonify({"error": "Title cannot be empty"}), 400
+    sess = ChatSession.query.filter_by(session_id=session_id).first()
+    if not sess:
+        return jsonify({"error": "Session not found"}), 404
+    sess.title = new_title
+    db.session.commit()
+    return jsonify(sess.to_dict())
+
+@admin_bp.route("/agent/sessions/<session_id>", methods=["DELETE", "POST"])
+def delete_chat_session(session_id):
+    """
+    Permanently delete a chat session and its associated messages.
+    Also clears in-memory draft and conversation history for that session.
+    """
+    sess = ChatSession.query.filter_by(session_id=session_id).first()
+    if not sess:
+        return jsonify({"error": "Session not found"}), 404
+
+    try:
+        from app.services.order_session import clear_draft
+        from app.services.agent import _conversations
+        clear_draft(session_id)
+        if session_id in _conversations:
+            del _conversations[session_id]
+
+        db.session.delete(sess)
+        db.session.commit()
+        return jsonify({"ok": True, "message": f"Chat session '{session_id}' deleted successfully."})
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 500

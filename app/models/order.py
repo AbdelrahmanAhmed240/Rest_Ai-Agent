@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 from app.models.base import db
 
-
 class Order(db.Model):
     """
     Order Model representing customer orders for delivery, pickup, or dine-in.
@@ -10,13 +9,15 @@ class Order(db.Model):
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     order_code = db.Column(db.String(30), unique=True, nullable=False, index=True)  # e.g., "ORD-60689"
-    customer_id = db.Column(db.Integer, db.ForeignKey("customers.id"), nullable=False)
+    customer_id = db.Column(db.Integer, db.ForeignKey("customers.id"), nullable=True)
+    customer_name = db.Column(db.String(100), nullable=True)
+    customer_phone = db.Column(db.String(20), nullable=True)
     order_type = db.Column(db.String(20), nullable=False, default="delivery")  # "delivery", "pickup", "dine_in"
     payment_method = db.Column(db.String(20), nullable=False, default="Cash")  # "Cash" or "Visa"
     delivery_address = db.Column(db.String(255), nullable=True)
     pickup_branch = db.Column(db.String(100), nullable=True)
     table_number = db.Column(db.String(50), nullable=True)
-    status = db.Column(db.String(30), nullable=False, default="In Kitchen")  # "In Kitchen", "Delivered", "Cancelled"
+    status = db.Column(db.String(30), nullable=False, default="In Kitchen")  # "In Kitchen", "Ready", "Delivered", "Cancelled"
     total_price = db.Column(db.Float, nullable=False, default=0.0)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
@@ -29,11 +30,13 @@ class Order(db.Model):
         return " | ".join([f"{item.product_name} x{item.quantity}" for item in self.items])
 
     def to_dict(self):
+        c_name = self.customer.name if self.customer else self.customer_name
+        c_phone = self.customer.phone if self.customer else self.customer_phone
         return {
             "id": self.id,
             "order_code": self.order_code,
-            "customer_name": self.customer.name if self.customer else None,
-            "customer_phone": self.customer.phone if self.customer else None,
+            "customer_name": c_name,
+            "customer_phone": c_phone,
             "order_type": self.order_type,
             "payment_method": self.payment_method,
             "delivery_address": self.delivery_address,
@@ -48,7 +51,6 @@ class Order(db.Model):
 
     def __repr__(self):
         return f"<Order {self.order_code}: {self.total_price} EGP [{self.status}]>"
-
 
 class OrderItem(db.Model):
     """

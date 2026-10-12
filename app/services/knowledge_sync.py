@@ -3,7 +3,7 @@ from pathlib import Path # much easier and safer for calling file system paths t
 from typing import List # used for list containing strings
 
 from app.models import db, KnowledgeItem #SQLAlchemy model
-from app.services.vector_store import delete_chunks, upsert_chunks #Chroma operations
+from app.services.vector_store import delete_chunks, upsert_chunks, get_collection #Chroma operations
 from app.services.chunker import chunk_markdown #chunking markdown into smaller pieces
 
 _KNOWLEDGE_DIR = Path(__file__).resolve().parent.parent.parent / "knowledge" #get the knowledge directory path relative to this file (contains the markdown)
@@ -40,44 +40,6 @@ def _chunk_ids_for_path(path: Path, source: str) -> list:
     chunks = chunk_markdown(content, source)
     return [chunk["id"] for chunk in chunks]
 
-def _replace_chunk_block(content: str, chunk_id: str, new_block: str, source: str | None = None) -> str:
-    lines = content.splitlines()
-    start_idx = None
-    end_idx = None
-
-    for i, line in enumerate(lines):
-        if line.startswith("## "):
-            block_text = "\n".join(lines[i:])
-            if f"id: {chunk_id}" in block_text:
-                start_idx = i
-                break
-
-    if start_idx is None:
-        for i, line in enumerate(lines):
-            if line.strip() == f"id: {chunk_id}":
-                for j in range(i - 1, -1, -1):
-                    if lines[j].startswith("#"):
-                        start_idx = j
-                        break
-                else:
-                    start_idx = 0
-                break
-
-    if start_idx is None:
-        raise ValueError(f"Chunk '{chunk_id}' not found in Markdown source.")
-
-    if end_idx is None:
-        for i in range(start_idx + 1, len(lines)):
-            if lines[i].startswith("#"):
-                end_idx = i
-                break
-        else:
-            end_idx = len(lines)
-
-    new_lines = lines[:start_idx] + new_block.strip().splitlines() + lines[end_idx:]
-    return "\n".join(new_lines)
-
-##########################
 def _reindex_markdown(path: Path, chunk_ids: List[str] | None = None) -> None:
     # Rechunk one Markdown file and upsert its chunks into Chroma.
     path = path.resolve()
@@ -94,7 +56,7 @@ def _purge_orphaned_chroma_chunks(valid_sources) -> None:
     # Delete Chroma chunks whose source is no longer on disk and not mapped in the DB.
     valid_sources = set(valid_sources)
     try:
-        collection = __import__("app.services.vector_store", fromlist=["get_collection"]).get_collection()
+        collection = get_collection()
         raw = collection.get(include=["metadatas"])
         orphaned_ids = []
         for chunk_id, meta in zip(raw.get("ids", []), raw.get("metadatas", [])):
@@ -106,7 +68,7 @@ def _purge_orphaned_chroma_chunks(valid_sources) -> None:
     except Exception:
         pass
 
-def sync_all() -> None:
+def sync_all(force_reindex: bool = False) -> None:
     # Ensure all Markdown files are mirrored into KnowledgeItem records.
     _ensure_knowledge_dir()
     files = sorted(_KNOWLEDGE_DIR.glob("*.md"))
@@ -120,27 +82,11 @@ def sync_all() -> None:
 
         item = KnowledgeItem.query.filter_by(source_path=rel).first()
         if not item:
-            item = KnowledgeItem(
-                title=title,
-                category=category,
-                content=content,
-                source_path=rel,
-            )
-            db.session.add(item)
+            db.session.add(KnowledgeItem(title=title, category=category, content=content, source_path=rel))
             db.session.commit()
-        else:
-            changed = False
-            if item.title != title:
-                item.title = title
-                changed = True
-            if item.category != category:
-                item.category = category
-                changed = True
-            if item.content != content:
-                item.content = content
-                changed = True
-            if changed:
-                db.session.commit()
+        elif item.title != title or item.category != category or item.content != content:
+            item.title, item.category, item.content = title, category, content
+            db.session.commit()
 
     # Remove DB items whose markdown source was deleted
     orphaned = KnowledgeItem.query.filter(
@@ -159,12 +105,27 @@ def sync_all() -> None:
     except Exception:
         pass
 
-    # Reindex only changed markdown files
+    # Reindex markdown files (or all files if force_reindex is True)
     for path in files:
-        item = KnowledgeItem.query.filter_by(source_path=str(path.relative_to(_KNOWLEDGE_DIR))).first()
-        content = path.read_text(encoding="utf-8")
-        if item is None or item.content != content:
+        if force_reindex:
             _reindex_markdown(path)
+        else:
+            item = KnowledgeItem.query.filter_by(source_path=str(path.relative_to(_KNOWLEDGE_DIR))).first()
+            content = path.read_text(encoding="utf-8")
+            if item is None or item.content != content:
+                _reindex_markdown(path)
+
+
+def rebuild_vector_index() -> int:
+    """Safely reset ChromaDB knowledge collection and rebuild vectors from all Markdown sources.
+    Used for model migrations (e.g. migrating to Gemini embeddings) or fresh sync.
+    """
+    from app.services.vector_store import reset_collection
+    reset_collection()
+    sync_all(force_reindex=True)
+    collection = get_collection()
+    return collection.count()
+
 
 def create_item_from_dashboard(title: str, category: str, content: str) -> KnowledgeItem:
     # Create a new Markdown file from the dashboard and sync it.
@@ -271,7 +232,7 @@ def _remove_indexed_chunks_for_item(item: KnowledgeItem, source: str | None = No
     else:
         # Orphaned source removed from disk: delete its chunks by metadata source.
         try:
-            collection = __import__("app.services.vector_store", fromlist=["get_collection"]).get_collection()
+            collection = get_collection()
             result = collection.get(where={"source": source}, include=["ids"])
             ids = result.get("ids", [])
             if ids:

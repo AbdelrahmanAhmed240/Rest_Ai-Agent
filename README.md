@@ -85,47 +85,67 @@ requirements.txt
 README.md
 ```
 
-## Setup
+## Setup & Quickstart
 
-1. Create a virtual environment.
-2. Install dependencies.
-3. Copy `.env.example` to `.env` and set required variables.
-4. Run the server.
-5. Visit `http://127.0.0.1:5000`.
+1. **Install Dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. **Configure Environment:**
+   Copy `.env.example` to `.env`:
+   ```bash
+   cp .env.example .env
+   ```
+   Add your Google Gemini API key:
+   ```env
+   LLM_PROVIDER=gemini
+   GEMINI_API_KEY=your_gemini_api_key_here
+   GEMINI_MODEL=gemini-2.5-flash
+   GEMINI_EMBEDDING_MODEL=gemini-embedding-001
+   ```
+   *(Get your key from [Google AI Studio](https://aistudio.google.com/)).*
+
+3. **Rebuild ChromaDB Vectors with Gemini Embeddings:**
+   Once your `GEMINI_API_KEY` is added, rebuild your knowledge vector index:
+   - Either navigate to the Admin Dashboard at `http://127.0.0.1:5000/admin/knowledge` and click **"Rebuild Vectors"**,
+   - Or run in Python:
+     ```bash
+     python -c "from app import create_app; from app.services.knowledge_sync import rebuild_vector_index; app = create_app(); app.app_context().push(); print('Indexed chunks:', rebuild_vector_index())"
+     ```
+
+4. **Start the Application:**
+   ```bash
+   python run.py
+   ```
+   Open `http://127.0.0.1:5000` or admin dashboard at `http://127.0.0.1:5000/admin`.
 
 ## Environment Variables
 
-- `SECRET_KEY`
-- `DEBUG`
-- `PORT`
-- `DATABASE_URI`
-- `OPENROUTER_API_KEY`
-- `OPENROUTER_BASE_URL`
-- `OPENROUTER_MODEL`
-- `OPENROUTER_FALLBACK_MODELS`
-- `EMBEDDING_MODEL`
-- `CHROMA_PERSIST_DIR`
-- `AGENT_TEMPERATURE`
-- `AGENT_MAX_TOKENS`
+| Variable | Description | Default / Example |
+| :--- | :--- | :--- |
+| `GEMINI_API_KEY` | Google Gemini API key | *(required for live Gemini)* |
+| `GEMINI_MODEL` | Selected Gemini generation model | `gemini-2.5-flash` |
+| `GEMINI_EMBEDDING_MODEL` | Official Gemini embedding model | `gemini-embedding-001` |
+| `DATABASE_URI` | SQLite database URI | `sqlite:///restaurant.db` |
+| `CHROMA_PERSIST_DIR` | Chroma vector database directory | `./data/chroma_db` |
+| `AGENT_TEMPERATURE` | Model generation temperature | `0.3` |
+| `AGENT_MAX_TOKENS` | Max response tokens | `512` |
 
 Never commit real secret values.
 
-## Demo
+## Model Selection & Discovery
 
-1. Customer asks a question.
-2. Agent retrieves knowledge.
-3. Customer asks for a recommendation.
-4. Customer places an order.
-5. Order is stored in SQLite.
-6. Admin sees the order.
-7. Admin updates knowledge.
-8. Agent uses the updated knowledge.
+To change the active Gemini model, edit `GEMINI_MODEL` in your `.env` file without changing Python code:
+- `gemini-2.5-flash` (Recommended default: fast, highly capable, supports structured tool use)
+- `gemini-2.5-pro` (High-reasoning model for complex queries)
+- `gemini-2.0-flash` (Alternative fast flash model)
 
-## Limitations
+For embeddings, `GEMINI_EMBEDDING_MODEL` defaults to `gemini-embedding-001`, Google's official stable embedding model.
 
-- OpenRouter free-tier rate limits may affect live AI calls.
-- Conversation history is kept in memory only.
-- Order management is basic; no payment gateway.
-- Admin forms do not include CSRF protection.
-- No Alembic/migration system.
-- Meta Messenger integration is not included in this submission.
+## Troubleshooting Common API Errors
+
+- **`Gemini API key is not configured`**: Add `GEMINI_API_KEY=your_key` to `.env`.
+- **`Invalid Gemini API key`**: Verify key validity on [Google AI Studio](https://aistudio.google.com/).
+- **`Configured Gemini model 'xyz' was not found`**: Verify model spelling in `GEMINI_MODEL`.
+- **`Sorry, the Gemini AI service is currently rate-limited`**: Wait a brief moment or upgrade quota tier.
+- **`Dimensional mismatch in ChromaDB`**: If switching embedding models, click **"Rebuild Vectors"** in the Admin Dashboard (`/admin/knowledge`) to recreate the collection with the new vector dimensions.

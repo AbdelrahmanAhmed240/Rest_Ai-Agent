@@ -60,3 +60,6 @@ desktop.ini
 temp/
 tmp/
 *.tmp
+
+# Local exam preparation materials (never commit or push)
+exam_prep/

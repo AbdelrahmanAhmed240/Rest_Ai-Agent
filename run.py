@@ -5,5 +5,5 @@ from config import config
 app = create_app()
 
 if __name__ == "__main__":
-    print(f"🚀 Starting Restaurant Admin Server on http://127.0.0.1:{config.PORT}")
-    app.run(host="0.0.0.0", port=config.PORT, debug=config.DEBUG)
+    print(f"Starting Restaurant Admin Server on http://127.0.0.1:{config.PORT}")
+    app.run(host="0.0.0.0", port=config.PORT, debug=config.DEBUG, use_reloader=False)

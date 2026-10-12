@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 from app.models.base import db
 
-
 class KnowledgeItem(db.Model):
     """
     KnowledgeItem Model storing raw RAG knowledge chunks in SQL.

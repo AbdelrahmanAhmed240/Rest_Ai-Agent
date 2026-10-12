@@ -1,12 +1,26 @@
+from typing import Optional
 from app.models.base import db
 from app.models.product import Product
 from app.models.customer import Customer
 from app.models.order import Order, OrderItem
 from sqlalchemy.exc import IntegrityError
 import datetime
-import uuid
+import functools
+from flask import has_app_context
 
+def _with_app_context(func):
+    """Ensure database query executes within a Flask application context."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        if not has_app_context():
+            from app import create_app
+            app = create_app()
+            with app.app_context():
+                return func(*args, **kwargs)
+        return func(*args, **kwargs)
+    return wrapper
 
+@_with_app_context
 def search_products(query: str, limit: int = 10) -> dict:
     """
     Search available products by name or category.
@@ -52,14 +66,20 @@ def search_products(query: str, limit: int = 10) -> dict:
             "water": "مياه",
             "garlic": "ثومية",
             "tahina": "طحينة",
-            "sauce": "صصة",
+            "sauce": "صوص",
             "drink": "مشروب",
-            "sides": "أطراف",
+            "sides": "إضافات",
             "addon": "إضافة",
             "addons": "إضافات",
             "shawarma": "شاورما",
             "kfc": "كريسبي",
             "crispy": "كريسبي",
+            "broasted": "بروستد",
+            "strips": "ستربس",
+            "strip": "ستربس",
+            "fatta": "فتة",
+            "rice": "أرز",
+            "basmati": "بسمتي",
             "spicy": "حار",
             "hot": "حار",
             "pepper": "فلفل",
@@ -97,7 +117,6 @@ def search_products(query: str, limit: int = 10) -> dict:
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
-
 def _matches_spicy(product: Product) -> bool:
     spicy_signals = ["spicy", "حار", "hot", "pepper"]
     text = " ".join(
@@ -109,7 +128,6 @@ def _matches_spicy(product: Product) -> bool:
     ).lower()
     return any(signal in text for signal in spicy_signals)
 
-
 def _meal_priority(product: Product) -> int:
     category = (product.category or "").lower()
     name = (product.name or "").lower()
@@ -119,7 +137,7 @@ def _meal_priority(product: Product) -> int:
         return 0
     return 1
 
-
+@_with_app_context
 def recommend_products(message: str, limit: int = 3) -> dict:
     """
     Simple recommendation helper based on actual product data.
@@ -152,8 +170,8 @@ def recommend_products(message: str, limit: int = 3) -> dict:
 
         scored = []
         for p in results:
-            score = 0.0
-            price = p.combo_price or p.price
+            score = float(_meal_priority(p))
+            price = p.price
 
             if budget is not None:
                 if price > budget:
@@ -162,11 +180,15 @@ def recommend_products(message: str, limit: int = 3) -> dict:
 
             if "spicy" in text or "حار" in text:
                 if _matches_spicy(p):
-                    score += 1.0
+                    score += 2.0
+
+            if any(k in text for k in ("lunch", "dinner", "meal", "غداء", "عشاء", "وجبة", "جوعان", "hungry")):
+                if (p.category or "").lower() == "meals":
+                    score += 3.0
 
             scored.append((score, p))
 
-        scored.sort(key=lambda x: (-x[0], (x[1].combo_price or x[1].price)))
+        scored.sort(key=lambda x: (-x[0], x[1].price))
         items = [
             {
                 "id": p.id,
@@ -183,7 +205,63 @@ def recommend_products(message: str, limit: int = 3) -> dict:
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
+@_with_app_context
+def query_price_info(message: str) -> dict:
+    """
+    Deterministic calculation for menu price questions:
+    - cheapest meal / أرخص وجبة
+    - most expensive meal / أغلى وجبة
+    - meals under X EGP / وجبات أقل من X
+    - price of each meal / أسعار كل الوجبات
+    """
+    try:
+        text = (message or "").strip().lower()
+        meals = Product.query.filter(Product.is_available == True, Product.category == "Meals").order_by(Product.price.asc()).all()
+        if not meals:
+            return {"ok": False, "error": "No available meals found in the menu."}
 
+        # Check for threshold like 'under 200 egp' or 'less than 200'
+        import re
+        under_match = re.search(r"(?:under|less than|أقل من|تحت)\s*(\d{2,5})", text)
+        if under_match:
+            threshold = float(under_match.group(1))
+            matched_meals = [m for m in meals if m.price <= threshold]
+            lines = [f"### 💰 Meals Under {threshold:.0f} EGP\n"]
+            if not matched_meals:
+                lines.append(f"There are currently no meals under {threshold:.0f} EGP.")
+            else:
+                for m in matched_meals:
+                    lines.append(f"* **{m.name}** — {m.price:.0f} EGP *(Combo upgrade: +{m.combo_price:.0f} EGP)*")
+            return {"ok": True, "type": "threshold", "text": "\n".join(lines), "items": [m.to_dict() for m in matched_meals]}
+
+        if any(k in text for k in ["cheapest", "ارخص", "أرخص"]):
+            min_price = meals[0].price
+            cheapest = [m for m in meals if m.price == min_price]
+            lines = ["### 🏷️ Cheapest Meal Option\n"]
+            for m in cheapest:
+                lines.append(f"* **{m.name}** — {m.price:.0f} EGP *(Combo upgrade: +{m.combo_price:.0f} EGP for fries and drink)*")
+            return {"ok": True, "type": "cheapest", "text": "\n".join(lines), "items": [m.to_dict() for m in cheapest]}
+
+        if any(k in text for k in ["most expensive", "highest", "اغلى", "أغلى"]):
+            max_price = max(m.price for m in meals)
+            expensive = [m for m in meals if m.price == max_price]
+            lines = ["### 👑 Most Premium Meal Option\n"]
+            for m in expensive:
+                lines.append(f"* **{m.name}** — {m.price:.0f} EGP *(Combo upgrade: +{m.combo_price:.0f} EGP)*")
+            return {"ok": True, "type": "most_expensive", "text": "\n".join(lines), "items": [m.to_dict() for m in expensive]}
+
+        # Price of each meal / all meal prices
+        if any(k in text for k in ["price of each", "all meal prices", "سعر كل", "أسعار الوجبات"]):
+            lines = ["### 🍗 Prices of All Meals\n"]
+            for m in meals:
+                lines.append(f"* **{m.name}** — {m.price:.0f} EGP *(Combo: +{m.combo_price:.0f} EGP)*")
+            return {"ok": True, "type": "all_prices", "text": "\n".join(lines), "items": [m.to_dict() for m in meals]}
+
+        return {"ok": False, "error": "Not a specific price comparison query."}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+@_with_app_context
 def find_or_create_customer(name: str, phone: str, address: str = "") -> dict:
     """
     Find an existing customer by phone or create one if missing.
@@ -236,7 +314,7 @@ def find_or_create_customer(name: str, phone: str, address: str = "") -> dict:
         db.session.rollback()
         return {"ok": False, "error": str(exc)}
 
-
+@_with_app_context
 def create_order(
     customer_id: int,
     items: list[dict],
@@ -256,17 +334,27 @@ def create_order(
     Returns order summary or error.
     """
     try:
-        customer = Customer.query.get(customer_id)
+        customer = db.session.get(Customer, customer_id)
         if not customer:
             return {"ok": False, "error": "Customer not found."}
 
         if not items:
             return {"ok": False, "error": "Order must include at least one item."}
 
-        order_code = f"ORD-{int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:6]}"
+        # Generate unique 5-digit order code (e.g. 'ORD-60689') matching the assessment format
+        import random
+        for _ in range(20):
+            candidate_code = f"ORD-{random.randint(10000, 99999)}"
+            if not Order.query.filter_by(order_code=candidate_code).first():
+                order_code = candidate_code
+                break
+        else:
+            order_code = f"ORD-{int(datetime.datetime.now(datetime.timezone.utc).timestamp() % 100000):05d}"
         order = Order(
             order_code=order_code,
             customer_id=customer.id,
+            customer_name=customer.name,
+            customer_phone=customer.phone,
             order_type=order_type or "delivery",
             payment_method=payment_method or "Cash",
             delivery_address=delivery_address or None,
@@ -283,7 +371,7 @@ def create_order(
         for item in items:
             product = None
             if item.get("product_id") is not None:
-                product = Product.query.get(item.get("product_id"))
+                product = db.session.get(Product, item.get("product_id"))
             if product is None and item.get("product_name"):
                 product = Product.query.filter(
                     Product.name.ilike(item.get("product_name"))
@@ -324,7 +412,10 @@ def create_order(
 
             unit_price = item.get("unit_price")
             if unit_price is None:
-                unit_price = product.combo_price if product.combo_price else product.price
+                if item.get("is_combo") and product.combo_price:
+                    unit_price = product.price + product.combo_price
+                else:
+                    unit_price = product.price
             unit_price = float(unit_price)
             line_total = round(unit_price * quantity, 2)
             total += line_total
@@ -372,7 +463,6 @@ def create_order(
         db.session.rollback()
         return {"ok": False, "error": str(exc)}
 
-
 def _normalize_egyptian_phone(value: str) -> str:
     digits = "".join(ch for ch in value if ch.isdigit())
     if digits.startswith("20"):
@@ -381,7 +471,6 @@ def _normalize_egyptian_phone(value: str) -> str:
         digits = digits[1:]
     return digits
 
-
 def _extract_order_code(text: str) -> str | None:
     import re
 
@@ -389,7 +478,6 @@ def _extract_order_code(text: str) -> str | None:
     if match:
         return f"ORD-{match.group(1)}"
     return None
-
 
 def _find_order_for_customer(order_code: str, phone: str) -> Order | None:
     if not order_code or not phone:
@@ -405,7 +493,7 @@ def _find_order_for_customer(order_code: str, phone: str) -> Order | None:
         return None
     return Order.query.filter_by(order_code=order_code, customer_id=customer.id).first()
 
-
+@_with_app_context
 def edit_order(order_code: str, phone: str, items: list[dict] | None = None, status: str | None = None) -> dict:
     try:
         order = _find_order_for_customer(order_code, phone)
@@ -430,7 +518,9 @@ def edit_order(order_code: str, phone: str, items: list[dict] | None = None, sta
                     db.session.rollback()
                     return {"ok": False, "error": f"Product not found: {product_name}"}
 
-                unit_price = product.combo_price if product.combo_price else product.price
+                is_combo = bool(item.get("is_combo"))
+                combo_fee = product.combo_price if (is_combo and product.combo_price) else 0.0
+                unit_price = product.price + combo_fee
                 line_total = round(unit_price * quantity, 2)
                 total += line_total
                 db.session.add(
@@ -465,7 +555,7 @@ def edit_order(order_code: str, phone: str, items: list[dict] | None = None, sta
         db.session.rollback()
         return {"ok": False, "error": str(exc)}
 
-
+@_with_app_context
 def cancel_order(order_code: str, phone: str) -> dict:
     try:
         order = _find_order_for_customer(order_code, phone)
@@ -486,6 +576,49 @@ def cancel_order(order_code: str, phone: str) -> dict:
         db.session.rollback()
         return {"ok": False, "error": str(exc)}
 
+@_with_app_context
+def track_order(order_code: str, phone: Optional[str] = None) -> dict:
+    """
+    Look up authoritative order status from the database.
+    If phone is provided, verifies customer ownership.
+    If phone is not provided, requires the exact order code.
+    Returns authoritative current status and details.
+    """
+    try:
+        if not order_code:
+            return {"ok": False, "error": "Order code is required."}
+
+        order = Order.query.filter_by(order_code=order_code.strip()).first()
+        if not order:
+            return {"ok": False, "error": f"No order found with code '{order_code}'."}
+
+        # Privacy check if phone is provided
+        if phone:
+            normalized_req = _normalize_egyptian_phone(phone)
+            cust_phone = order.customer.phone if order.customer else (order.customer_phone or "")
+            normalized_cust = _normalize_egyptian_phone(cust_phone)
+            if normalized_req and normalized_cust and normalized_req != normalized_cust:
+                return {"ok": False, "error": "Phone number does not match this order."}
+
+        c_name = order.customer.name if order.customer else (order.customer_name or "Valued Customer")
+        c_phone = order.customer.phone if order.customer else (order.customer_phone or "")
+
+        return {
+            "ok": True,
+            "order_code": order.order_code,
+            "status": order.status,
+            "customer_name": c_name,
+            "customer_phone": c_phone,
+            "order_type": order.order_type,
+            "delivery_address": order.delivery_address,
+            "pickup_branch": order.pickup_branch,
+            "table_number": order.table_number,
+            "total_price": order.total_price,
+            "created_at": order.created_at.strftime("%Y-%m-%d %H:%M:%S") if order.created_at else None,
+            "items": [it.to_dict() for it in order.items],
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 def tool_result_text(result: dict) -> str:
     """
@@ -495,24 +628,44 @@ def tool_result_text(result: dict) -> str:
         return str(result)
     if result.get("ok"):
         if "items" in result and "order_code" in result and "status" in result and "total_price" in result:
+            items_lines = "\n".join(f"* **{i['product_name']}** x{i['quantity']} — {i['unit_price']} EGP (Total: {i['line_total']} EGP)" for i in result.get("items", []))
             return (
-                f"Order updated: {result['order_code']}. Status: {result['status']}. "
-                f"Total: {result['total_price']} EGP. "
-                f"Items: {', '.join(i['product_name'] + ' x' + str(i['quantity']) for i in result.get('items', []))}"
+                f"### 🧾 Order Update: {result['order_code']}\n\n"
+                f"* **Status**: {result['status']}\n"
+                f"* **Total**: {result['total_price']} EGP\n\n"
+                f"#### Items:\n{items_lines}"
             )
         if "items" in result:
             if not result["items"]:
                 return "No products matched the search."
             lines = []
             for item in result["items"]:
-                price = item.get("combo_price") or item.get("price")
-                lines.append(f"- {item['name']} ({item['category']}): {price} EGP")
+                price = item.get("price", 0.0)
+                combo = item.get("combo_price", 0.0)
+                combo_str = f" *(Combo upgrade: +{combo:.0f} EGP)*" if combo and combo > 0 else ""
+                desc = (item.get("description") or "").replace("\n", " ").strip()
+                desc_str = f" — {desc}" if desc and desc != item["name"] else ""
+                lines.append(f"* **{item['name']}** ({item['category']}) — {price:.0f} EGP{combo_str}{desc_str}")
             return "\n".join(lines)
         if "order_code" in result:
+            items_lines = "\n".join(f"* **{i['product_name']}** x{i['quantity']} — {i['unit_price']} EGP (Total: {i['line_total']} EGP)" for i in result.get("items", []))
+            dest = ""
+            otype = result.get('order_type')
+            if otype == "delivery":
+                dest = f"* **Delivery Address**: {result.get('delivery_address')}\n"
+            elif otype == "pickup":
+                dest = f"* **Pickup Branch**: {result.get('pickup_branch')}\n"
+            elif otype == "dine_in":
+                dest = f"* **Table Number**: {result.get('table_number')}\n"
             return (
-                f"Order created: {result['order_code']} for customer {result.get('customer_name')} "
-                f"({result.get('customer_phone')}). Total: {result.get('total_price')} EGP. "
-                f"Items: {', '.join(i['product_name'] + ' x' + str(i['quantity']) for i in result.get('items', []))}"
+                f"### 🧾 Order Confirmation: {result['order_code']}\n\n"
+                f"* **Customer**: {result.get('customer_name')} ({result.get('customer_phone')})\n"
+                f"* **Order Type**: {otype}\n"
+                f"{dest}"
+                f"* **Payment Method**: {result.get('payment_method')}\n"
+                f"* **Status**: {result.get('status', 'In Kitchen')}\n"
+                f"* **Total**: {result.get('total_price')} EGP\n\n"
+                f"#### Items:\n{items_lines}"
             )
         if result.get("created"):
             return f"Customer created: {result.get('name')} ({result.get('phone')})."

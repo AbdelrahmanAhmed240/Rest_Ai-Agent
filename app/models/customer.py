@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 from app.models.base import db
 
-
 class Customer(db.Model):
     """
     Customer Model representing unique customers identified primarily by normalized phone number.
@@ -15,7 +14,7 @@ class Customer(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     # 1-to-Many Relationship: One customer can have multiple orders
-    orders = db.relationship("Order", back_populates="customer", cascade="all, delete-orphan")
+    orders = db.relationship("Order", back_populates="customer")
 
     def to_dict(self):
         return {

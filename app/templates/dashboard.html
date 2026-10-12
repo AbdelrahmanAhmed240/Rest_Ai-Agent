@@ -1,6 +1,72 @@
-﻿{% extends "base.html" %}
+{% extends "base.html" %}
 
 {% block title %}Dashboard Overview - Restaurant Admin{% endblock %}
+
+{% block extra_head %}
+<!-- Markdown Parser & DOMPurify for rich, secure agent responses -->
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.2/dist/purify.min.js"></script>
+<style>
+    .chat-markdown {
+        color: #212529;
+        font-size: 0.95rem;
+        line-height: 1.65;
+        word-break: break-word;
+        unicode-bidi: plaintext;
+        text-align: start;
+    }
+    .chat-markdown h3 {
+        font-size: 1.25rem;
+        font-weight: 700;
+        margin-top: 0.4rem;
+        margin-bottom: 0.75rem;
+        color: #111827;
+        border-bottom: 2px solid #ffc107;
+        padding-bottom: 0.35rem;
+    }
+    .chat-markdown h4 {
+        font-size: 1.02rem;
+        font-weight: 700;
+        margin-top: 1rem;
+        margin-bottom: 0.5rem;
+        color: #1f2937;
+        background-color: #f8f9fa;
+        border-left: 3px solid #ffc107;
+        padding: 0.3rem 0.65rem;
+        border-radius: 4px;
+        display: inline-block;
+    }
+    .chat-markdown p {
+        margin-top: 0.55rem;
+        margin-bottom: 0.35rem;
+    }
+    .chat-markdown p:first-child {
+        margin-top: 0;
+    }
+    .chat-markdown strong {
+        font-weight: 700;
+        color: #111827;
+    }
+    .chat-markdown ul, .chat-markdown ol {
+        margin-top: 0.25rem;
+        margin-bottom: 0.75rem;
+        padding-inline-start: 1.45rem;
+        list-style-type: disc;
+    }
+    .chat-markdown li {
+        margin-bottom: 0.28rem;
+        line-height: 1.55;
+    }
+    .chat-markdown blockquote {
+        border-left: 4px solid #ffc107;
+        background: #fff9e6;
+        padding: 0.5rem 0.85rem;
+        margin: 0.6rem 0;
+        border-radius: 4px;
+        font-size: 0.92rem;
+    }
+</style>
+{% endblock %}
 
 {% block content %}
 <div class="row mb-4">
@@ -131,23 +197,62 @@
     </div>
 </div>
 
-<!-- Agent Test Chat -->
+<!-- Agent Multi-Chat Assistant -->
 <div class="row mt-4" id="chat">
-    <div class="col-md-10 col-lg-8 mx-auto">
-        <div class="card">
-            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
-                <h5 class="mb-0 fw-bold"><i class="bi bi-robot me-2 text-warning"></i>Agent Test Chat</h5>
-                <span class="badge bg-warning text-dark">Simple testing interface</span>
-            </div>
-            <div class="card-body">
-                <div id="agent-messages" class="border rounded p-3 mb-3" style="min-height: 220px; max-height: 320px; overflow-y: auto; background: #fafafa;">
-                    <div class="text-muted small">Start a conversation to test the basic agent.</div>
+    <div class="col-12 col-xl-11 mx-auto">
+        <div class="card shadow-sm border-0">
+            <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                <div class="d-flex align-items-center gap-2">
+                    <h5 class="mb-0 fw-bold"><i class="bi bi-robot me-2 text-warning"></i>Restaurant AI Agent</h5>
+                    <span class="badge bg-warning text-dark"><i class="bi bi-circle-fill me-1 text-success small"></i>Live Assistant</span>
                 </div>
-                <form id="agent-chat-form" class="d-flex gap-2">
-                    <input type="text" id="agent-message" class="form-control" placeholder="Type a message..." required>
-                    <input type="hidden" id="agent-session-id" value="agent_test_session">
-                    <button type="submit" class="btn btn-warning fw-semibold" id="agent-send-btn">Send</button>
-                </form>
+                <div class="d-flex align-items-center gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-primary" id="btn-new-chat">
+                        <i class="bi bi-plus-lg me-1"></i>New Chat
+                    </button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="row g-0" style="min-height: 480px;">
+                    <!-- Sessions Sidebar -->
+                    <div class="col-md-4 col-lg-3 border-end bg-light d-flex flex-column" style="max-height: 540px;">
+                        <div class="p-2 border-bottom bg-white d-flex justify-content-between align-items-center">
+                            <span class="small fw-bold text-muted text-uppercase">Conversations</span>
+                            <span class="badge bg-secondary rounded-pill" id="sessions-count">0</span>
+                        </div>
+                        <div class="list-group list-group-flush flex-grow-1 overflow-auto" id="sessions-list" style="max-height: 480px;">
+                            <!-- Session items loaded dynamically -->
+                        </div>
+                    </div>
+
+                    <!-- Chat Message Area -->
+                    <div class="col-md-8 col-lg-9 d-flex flex-column bg-white">
+                        <!-- Active Session Header -->
+                        <div class="p-3 border-bottom d-flex justify-content-between align-items-center bg-white">
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="fw-bold fs-6" id="active-session-title">Chat 1</span>
+                                <button type="button" class="btn btn-sm btn-link text-muted p-0" id="btn-rename-active-chat" title="Rename this conversation">
+                                    <i class="bi bi-pencil-square"></i>
+                                </button>
+                            </div>
+                            <span class="badge bg-light text-muted border" id="active-session-id-display"></span>
+                        </div>
+
+                        <!-- Messages Container -->
+                        <div id="agent-messages" class="p-3 flex-grow-1 overflow-auto" style="height: 380px; max-height: 380px; background: #fafafa;">
+                            <div class="text-muted small text-center my-4">Select a chat or start typing to ask about meals, orders, or locations.</div>
+                        </div>
+
+                        <!-- Chat Input Form -->
+                        <div class="p-3 border-top bg-white">
+                            <form id="agent-chat-form" class="d-flex gap-2">
+                                <input type="text" id="agent-message" class="form-control" placeholder="Ask about menu, order food, or track an order..." required autocomplete="off">
+                                <input type="hidden" id="agent-session-id" value="">
+                                <button type="submit" class="btn btn-warning fw-semibold px-4" id="agent-send-btn">Send</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -163,19 +268,55 @@
     var sessionInput = document.getElementById('agent-session-id');
     var container = document.getElementById('agent-messages');
     var sendBtn = document.getElementById('agent-send-btn');
+    var btnNewChat = document.getElementById('btn-new-chat');
+    var sessionsList = document.getElementById('sessions-list');
+    var sessionsCount = document.getElementById('sessions-count');
+    var activeTitleDisplay = document.getElementById('active-session-title');
+    var activeIdDisplay = document.getElementById('active-session-id-display');
+    var btnRename = document.getElementById('btn-rename-active-chat');
 
+    var currentSessionId = localStorage.getItem('rest_agent_current_session') || '';
     var busy = false;
     var currentController = null;
 
-    function appendMessage(role, text) {
+    function renderMarkdownSafely(text) {
+        if (window.DOMPurify && window.marked) {
+            try {
+                return window.DOMPurify.sanitize(window.marked.parse(text));
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    function appendMessage(role, text, html) {
         var wrapper = document.createElement('div');
-        wrapper.className = 'mb-2';
+        wrapper.className = role === 'user' ? 'mb-3 text-end' : 'mb-3 text-start';
         var label = document.createElement('div');
-        label.className = 'small fw-semibold ' + (role === 'user' ? 'text-primary' : 'text-dark');
+        label.className = 'small fw-semibold mb-1 ' + (role === 'user' ? 'text-primary' : 'text-dark');
         label.textContent = role === 'user' ? 'You' : 'Agent';
         var bubble = document.createElement('div');
-        bubble.className = 'p-2 rounded ' + (role === 'user' ? 'bg-primary text-white' : 'bg-white border');
-        bubble.textContent = text;
+
+        if (role === 'user') {
+            bubble.className = 'p-2 px-3 rounded-4 bg-primary text-white d-inline-block text-start shadow-sm';
+            bubble.textContent = text;
+            bubble.style.whiteSpace = 'pre-wrap';
+            bubble.style.wordBreak = 'break-word';
+        } else {
+            bubble.className = 'p-3 rounded-3 bg-white border shadow-sm chat-markdown';
+            if (html) {
+                bubble.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
+            } else {
+                var clientRendered = renderMarkdownSafely(text);
+                if (clientRendered) {
+                    bubble.innerHTML = clientRendered;
+                } else {
+                    var div = document.createElement('div');
+                    div.textContent = text;
+                    bubble.innerHTML = div.innerHTML.replace(/\n/g, '<br>');
+                }
+            }
+        }
+
         wrapper.appendChild(label);
         wrapper.appendChild(bubble);
         container.appendChild(wrapper);
@@ -185,7 +326,7 @@
     function showTypingIndicator() {
         var wrapper = document.createElement('div');
         wrapper.id = 'agent-typing';
-        wrapper.className = 'mb-2';
+        wrapper.className = 'mb-2 text-start';
         var label = document.createElement('div');
         label.className = 'small fw-semibold text-dark';
         label.textContent = 'Agent';
@@ -203,11 +344,207 @@
         if (el) el.remove();
     }
 
+    // Load messages for a specific session
+    function loadSessionMessages(sId) {
+        if (!sId) return;
+        container.innerHTML = '<div class="text-center py-4"><span class="spinner-border spinner-border-sm text-secondary"></span> Loading messages...</div>';
+        fetch('/agent/sessions/' + encodeURIComponent(sId) + '/messages')
+            .then(function(res) {
+                if (!res.ok) throw new Error('Failed to load session');
+                return res.json();
+            })
+            .then(function(data) {
+                container.innerHTML = '';
+                var msgs = data.messages || [];
+                if (msgs.length === 0) {
+                    container.innerHTML = '<div class="text-muted small text-center my-4">No messages yet. Send a message to start!</div>';
+                } else {
+                    msgs.forEach(function(m) {
+                        appendMessage(m.role, m.content, m.html);
+                    });
+                }
+                container.scrollTop = container.scrollHeight;
+            })
+            .catch(function(err) {
+                container.innerHTML = '<div class="text-danger small text-center my-4">Failed to load chat history.</div>';
+            });
+    }
+
+    // Select active session
+    function selectSession(sId, title) {
+        currentSessionId = sId;
+        sessionInput.value = sId;
+        localStorage.setItem('rest_agent_current_session', sId);
+        if (activeTitleDisplay) activeTitleDisplay.textContent = title || 'Chat';
+        if (activeIdDisplay) activeIdDisplay.textContent = sId;
+
+        // Update active class in sidebar
+        var items = sessionsList.querySelectorAll('.session-item');
+        items.forEach(function(el) {
+            if (el.getAttribute('data-id') === sId) {
+                el.classList.add('active', 'bg-warning', 'text-dark', 'fw-semibold');
+                el.classList.remove('bg-transparent');
+            } else {
+                el.classList.remove('active', 'bg-warning', 'text-dark', 'fw-semibold');
+                el.classList.add('bg-transparent');
+            }
+        });
+
+        loadSessionMessages(sId);
+    }
+
+    // Load all persisted sessions
+    function loadSessions(keepActive) {
+        fetch('/agent/sessions')
+            .then(function(res) { return res.json(); })
+            .then(function(sessions) {
+                if (sessionsCount) sessionsCount.textContent = sessions.length;
+                sessionsList.innerHTML = '';
+                if (!sessions || sessions.length === 0) return;
+
+                sessions.forEach(function(s) {
+                    var itemWrapper = document.createElement('div');
+                    itemWrapper.className = 'list-group-item list-group-item-action border-0 py-2 px-3 small d-flex justify-content-between align-items-center session-item position-relative';
+                    itemWrapper.setAttribute('data-id', s.session_id);
+                    itemWrapper.style.cursor = 'pointer';
+
+                    itemWrapper.innerHTML =
+                        '<div class="text-truncate me-2 session-click-area flex-grow-1">' +
+                            '<i class="bi bi-chat-left-text me-2"></i>' +
+                            '<span class="session-title-text">' + (s.title || 'Chat') + '</span>' +
+                        '</div>' +
+                        '<div class="d-flex align-items-center gap-1">' +
+                            '<span class="badge bg-secondary-subtle text-secondary rounded-pill me-1">' + (s.message_count || 0) + '</span>' +
+                            '<button type="button" class="btn btn-sm btn-link text-danger p-0 delete-session-btn" title="Delete conversation" style="opacity: 0.6; line-height: 1;">' +
+                                '<i class="bi bi-trash"></i>' +
+                            '</button>' +
+                        '</div>';
+
+                    // Clicking on session title/area selects it
+                    var clickArea = itemWrapper.querySelector('.session-click-area');
+                    clickArea.addEventListener('click', function(ev) {
+                        ev.preventDefault();
+                        selectSession(s.session_id, s.title);
+                    });
+
+                    // Delete button handler
+                    var delBtn = itemWrapper.querySelector('.delete-session-btn');
+                    delBtn.addEventListener('mouseenter', function() { delBtn.style.opacity = '1'; });
+                    delBtn.addEventListener('mouseleave', function() { delBtn.style.opacity = '0.6'; });
+                    delBtn.addEventListener('click', function(ev) {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        var chatName = s.title || 'this chat';
+                        if (!confirm('Are you sure you want to permanently delete "' + chatName + '" and all its messages?')) {
+                            return;
+                        }
+
+                        delBtn.disabled = true;
+                        fetch('/agent/sessions/' + encodeURIComponent(s.session_id), {
+                            method: 'DELETE'
+                        })
+                        .then(function(res) {
+                            if (!res.ok) {
+                                return res.json().then(function(errData) {
+                                    throw new Error(errData.error || ('HTTP error ' + res.status));
+                                });
+                            }
+                            return res.json();
+                        })
+                        .then(function() {
+                            // If the deleted session was the active one, clear from localStorage
+                            if (currentSessionId === s.session_id) {
+                                localStorage.removeItem('rest_agent_current_session');
+                                currentSessionId = '';
+                            }
+                            // Reload sessions list
+                            loadSessions(true);
+                        })
+                        .catch(function(err) {
+                            delBtn.disabled = false;
+                            alert('Failed to delete chat: ' + err.message);
+                        });
+                    });
+
+                    sessionsList.appendChild(itemWrapper);
+                });
+
+                // Pick initial or fallback session
+                var activeFound = sessions.find(function(s) { return s.session_id === currentSessionId; });
+                if (keepActive && activeFound) {
+                    selectSession(activeFound.session_id, activeFound.title);
+                } else if (sessions.length > 0) {
+                    selectSession(sessions[0].session_id, sessions[0].title);
+                } else {
+                    // All sessions were deleted, automatically create a fresh one
+                    if (btnNewChat) btnNewChat.click();
+                }
+            })
+            .catch(function(err) {
+                console.error('Error loading sessions:', err);
+            });
+    }
+
+    // New Chat handler
+    if (btnNewChat) {
+        btnNewChat.addEventListener('click', function() {
+            btnNewChat.disabled = true;
+            fetch('/agent/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({})
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(newSess) {
+                btnNewChat.disabled = false;
+                loadSessions(false);
+                setTimeout(function() {
+                    selectSession(newSess.session_id, newSess.title);
+                }, 100);
+            })
+            .catch(function(err) {
+                btnNewChat.disabled = false;
+                alert('Failed to create new chat: ' + err.message);
+            });
+        });
+    }
+
+    // Rename chat handler
+    if (btnRename) {
+        btnRename.addEventListener('click', function() {
+            if (!currentSessionId) return;
+            var currentTitle = activeTitleDisplay.textContent.trim();
+            var newName = prompt('Enter a new name for this conversation:', currentTitle);
+            if (newName && newName.trim() && newName.trim() !== currentTitle) {
+                fetch('/agent/sessions/' + encodeURIComponent(currentSessionId) + '/rename', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({title: newName.trim()})
+                })
+                .then(function(res) { return res.json(); })
+                .then(function(updated) {
+                    if (activeTitleDisplay) activeTitleDisplay.textContent = updated.title;
+                    loadSessions(true);
+                })
+                .catch(function(err) {
+                    alert('Failed to rename: ' + err.message);
+                });
+            }
+        });
+    }
+
+    // Submit message handler
     form.addEventListener('submit', function(event) {
         event.preventDefault();
         if (busy) return;
         var message = input.value.trim();
         if (!message) return;
+
+        var sId = sessionInput.value;
+        if (!sId) {
+            alert('Please select or create a chat session first.');
+            return;
+        }
 
         busy = true;
         input.disabled = true;
@@ -226,21 +563,19 @@
             if (currentController === controller) {
                 controller.abort();
             }
-        }, 120000); // 120s timeout for free-tier LLM
+        }, 120000); // 120s timeout
 
         fetch('/agent/chat', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                session_id: sessionInput.value || 'agent_test_session',
+                session_id: sId,
                 message: message
             }),
             signal: controller.signal
         })
         .then(function(res) {
-            if (!res.ok) {
-                throw new Error('HTTP error ' + res.status);
-            }
+            if (!res.ok) throw new Error('HTTP error ' + res.status);
             return res.json();
         })
         .then(function(data) {
@@ -249,10 +584,12 @@
             if (data.error) {
                 appendMessage('agent', 'Error: ' + data.error);
             } else if (data.message) {
-                appendMessage('agent', data.message);
+                appendMessage('agent', data.message, data.html);
             } else {
                 appendMessage('agent', '(No response received)');
             }
+            // Refresh session list to update message count badge
+            loadSessions(true);
         })
         .catch(function(err) {
             clearTimeout(timeout);
@@ -266,7 +603,7 @@
         .finally(function() {
             busy = false;
             input.disabled = false;
-            input.placeholder = 'Type a message...';
+            input.placeholder = 'Ask about menu, order food, or track an order...';
             sendBtn.disabled = false;
             sendBtn.textContent = 'Send';
             currentController = null;
@@ -279,6 +616,9 @@
             e.preventDefault();
         }
     });
+
+    // Initialize sessions on page load
+    loadSessions(true);
 })();
 </script>
 {% endblock %}

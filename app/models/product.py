@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 from app.models.base import db
 
-
 class Product(db.Model):
     """
     Product Model representing food items, meals, combos, and drinks on the menu.

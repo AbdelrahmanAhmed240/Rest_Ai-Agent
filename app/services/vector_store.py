@@ -40,7 +40,6 @@ def get_client():
 
 def get_collection():
     # Return the single shared knowledge collection.
-    chromadb, _ = _import_chromadb()
     client = get_client()
     return client.get_or_create_collection(name="knowledge")
 
@@ -53,33 +52,39 @@ def _metadata(chunk: Dict) -> Dict:
         "category": chunk.get("category", ""),
     }
 
+def _prepare_chunk_payload(chunks: List[Dict]):
+    ids = [chunk["id"] for chunk in chunks]
+    documents = [chunk["text"] for chunk in chunks]
+    return ids, documents, embed_texts(documents), [_metadata(chunk) for chunk in chunks]
+
 def add_chunks(chunks: List[Dict]) -> None:
     # Add new chunks to Chroma with embeddings and metadata.
     if not chunks:
         return
     _ensure_chroma()
-    collection = get_collection()
-    ids = [chunk["id"] for chunk in chunks]
-    documents = [chunk["text"] for chunk in chunks]
-    embeddings = embed_texts(documents)
-    metadatas = [_metadata(chunk) for chunk in chunks]
-    collection.add(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
+    ids, docs, embs, metas = _prepare_chunk_payload(chunks)
+    get_collection().add(ids=ids, documents=docs, embeddings=embs, metadatas=metas)
 
-def _upsert_chunk_embeddings(chunks: List[Dict]) -> None:
-    # Replace existing vectors for the same chunk IDs.
+def upsert_chunks(chunks: List[Dict]) -> None:
+    # Add or update chunk embeddings in Chroma with metadata.
     if not chunks:
         return
     _ensure_chroma()
-    collection = get_collection()
-    ids = [chunk["id"] for chunk in chunks]
-    documents = [chunk["text"] for chunk in chunks]
-    embeddings = embed_texts(documents)
-    metadatas = [_metadata(chunk) for chunk in chunks]
-    collection.upsert(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
+    ids, docs, embs, metas = _prepare_chunk_payload(chunks)
+    get_collection().upsert(ids=ids, documents=docs, embeddings=embs, metadatas=metas)
 
-def upsert_chunks(chunks: List[Dict]) -> None:
-    # Public upsert entry point used by sync/reindex flows.
-    _upsert_chunk_embeddings(chunks)
+def reset_collection() -> None:
+    """Safely reset/recreate the knowledge collection to prevent dimensional mismatches
+    when switching embedding models (e.g. migrating to Gemini embeddings).
+    """
+    _ensure_chroma()
+    client = get_client()
+    try:
+        client.delete_collection("knowledge")
+    except Exception:
+        pass
+    client.get_or_create_collection(name="knowledge")
+
 
 def delete_chunks(ids: List[str]) -> None:
     # Remove vectors by chunk ID when Markdown sources change or are deleted.
