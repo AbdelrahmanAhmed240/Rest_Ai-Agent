@@ -2,8 +2,7 @@ from flask import Flask
 from config import config
 from app.models.base import db
 
-
-def create_app():
+def create_app(test_config=None):
     """
     Application Factory Pattern:
     Creates and configures the Flask application instance.
@@ -15,6 +14,9 @@ def create_app():
     app.config["SQLALCHEMY_DATABASE_URI"] = config.SQLALCHEMY_DATABASE_URI
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = config.SQLALCHEMY_TRACK_MODIFICATIONS
     app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+    if test_config:
+        app.config.update(test_config)
 
     # Initialize extensions with this app
     db.init_app(app)

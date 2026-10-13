@@ -12,7 +12,7 @@ Administrators can manage menu items, orders, customers, and the RAG knowledge b
 - Product and menu questions
 - AI recommendations based on real product data
 - RAG knowledge base with Markdown sources
-- Order creation, editing, and cancellation
+- Order creation and tracking
 - Conversation context during a session
 - Admin dashboard
 
@@ -36,14 +36,12 @@ Customer
 
 ## LangGraph
 
-The agent uses a small LangGraph workflow:
+The agent uses a simplified 2-path LangGraph workflow:
 
-- Router
-- Recommendation
-- RAG
-- Tools
-- LLM
-- Output
+- **Router**: Classifies intent into information or ordering
+- **RAG (`rag_node`)**: Retrieves relevant menu and policy context from ChromaDB
+- **Order Tools (`order_tool_node`)**: Manages draft items, fulfillment details, and atomic database commits
+- **LLM (`llm_node`)**: Generates grounded, contextual responses using Gemini
 
 This keeps the flow explicit and prevents the model from acting without the right context.
 
@@ -52,10 +50,9 @@ This keeps the flow explicit and prevents the model from acting without the righ
 The agent can perform real database actions:
 
 - Create order
-- Edit order
-- Cancel order
+- Track order
 
-Cancellation updates the order status in SQLite; historical records are preserved.
+Once placed, orders are final and cannot be modified or cancelled by customers.
 
 It uses the existing SQLAlchemy models and validation rules.
 The database is the source of truth.

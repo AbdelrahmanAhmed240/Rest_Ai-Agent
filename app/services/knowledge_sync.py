@@ -115,7 +115,6 @@ def sync_all(force_reindex: bool = False) -> None:
             if item is None or item.content != content:
                 _reindex_markdown(path)
 
-
 def rebuild_vector_index() -> int:
     """Safely reset ChromaDB knowledge collection and rebuild vectors from all Markdown sources.
     Used for model migrations (e.g. migrating to Gemini embeddings) or fresh sync.
@@ -125,7 +124,6 @@ def rebuild_vector_index() -> int:
     sync_all(force_reindex=True)
     collection = get_collection()
     return collection.count()
-
 
 def create_item_from_dashboard(title: str, category: str, content: str) -> KnowledgeItem:
     # Create a new Markdown file from the dashboard and sync it.
@@ -150,7 +148,6 @@ def create_item_from_dashboard(title: str, category: str, content: str) -> Knowl
     db.session.commit()
     _reindex_markdown(path)
     return item
-
 
 def create_markdown_source_from_admin(filename: str, title: str, category: str, content: str) -> KnowledgeItem:
     """

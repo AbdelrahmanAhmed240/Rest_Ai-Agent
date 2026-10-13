@@ -7,7 +7,6 @@ from config import config
 
 _gemini_client = None
 
-
 def get_gemini_client():
     """Lazily initialize Google Gen AI SDK client.
     Does not crash on import or when GEMINI_API_KEY is not yet configured.
@@ -22,7 +21,6 @@ def get_gemini_client():
         from google import genai
         _gemini_client = genai.Client(api_key=api_key)
     return _gemini_client
-
 
 def _embed_gemini(texts: List[str]) -> List[List[float]]:
     """Embed texts using the official Google Gen AI SDK embed_content API."""
@@ -50,7 +48,6 @@ def _embed_gemini(texts: List[str]) -> List[List[float]]:
 
     return all_embeddings
 
-
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """Generate real embeddings for multiple documents using Gemini embedding model.
     Does not fall back to other providers to avoid mixing incompatible vector spaces.
@@ -58,7 +55,6 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
     if not texts:
         return []
     return _embed_gemini(texts)
-
 
 def embed_query(text: str) -> List[float]:
     """Generate a real embedding for a single user query using the same Gemini embedding model."""

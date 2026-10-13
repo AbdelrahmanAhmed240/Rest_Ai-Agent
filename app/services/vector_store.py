@@ -11,7 +11,7 @@ _IMPORT_ERROR = None
 def _import_chromadb():
     global _IMPORT_ERROR
     try:
-        # Lazy import so the app can still start if Chroma is missing.
+        # Lazy import prevents web server boot failure if chromadb or its C++ dependencies have runtime issues
         import chromadb
         from chromadb.config import Settings
         return chromadb, Settings
@@ -20,7 +20,7 @@ def _import_chromadb():
         return None, None
 
 def _ensure_chroma():
-    # Fail fast on vector operations if Chroma could not be imported.
+    # Fail fast on vector operations if Chroma could not be imported
     if _IMPORT_ERROR is not None:
         raise RuntimeError(f"chromadb is required. Original error: {_IMPORT_ERROR}")
 
@@ -31,7 +31,8 @@ def get_client():
         chromadb, Settings = _import_chromadb()
         path = config.CHROMA_PERSIST_DIR
         os.makedirs(path, exist_ok=True)
-        # Persistent local Chroma client stored on disk.
+        # Persistent local Chroma client keeps precomputed vectors on disk across server reboots;
+        # disabling telemetry avoids blocking network calls on startup
         _client = chromadb.PersistentClient(
             path=path,
             settings=Settings(anonymized_telemetry=False),
@@ -39,7 +40,7 @@ def get_client():
     return _client
 
 def get_collection():
-    # Return the single shared knowledge collection.
+    # Return the single shared knowledge collection
     client = get_client()
     return client.get_or_create_collection(name="knowledge")
 
@@ -85,7 +86,6 @@ def reset_collection() -> None:
         pass
     client.get_or_create_collection(name="knowledge")
 
-
 def delete_chunks(ids: List[str]) -> None:
     # Remove vectors by chunk ID when Markdown sources change or are deleted.
     if not ids:
@@ -95,12 +95,13 @@ def delete_chunks(ids: List[str]) -> None:
     collection.delete(ids=ids)
 
 def retrieve(query: str, top_k: int = 5) -> List[Dict]:
-    # Semantic search: embed the query, then return the closest Chroma hits.
+    # Semantic search: embed user query with the same model to project it into the vector space
     if not query.strip():
         return []
     _ensure_chroma()
     collection = get_collection()
     query_embedding = embed_query(query)
+    # Include distances to allow calling layers to evaluate semantic confidence and filter noise
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
@@ -117,6 +118,7 @@ def retrieve(query: str, top_k: int = 5) -> List[Dict]:
                 "id": ids[idx] if idx < len(ids) else None,
                 "content": doc,
                 "metadata": metadatas[idx] if idx < len(metadatas) else {},
+                # Distance score (lower distance = closer semantic match in ChromaDB cosine space)
                 "score": distances[idx] if idx < len(distances) else None,
             }
         )

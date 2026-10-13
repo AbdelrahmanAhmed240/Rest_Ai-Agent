@@ -503,16 +503,16 @@ def agent_chat():
     if not message:
         return jsonify({"error": "message is required"}), 400
 
-    # Ensure ChatSession exists in DB
+    # Ensure ChatSession exists in DB so foreign key constraints on ChatMessage are satisfied
     chat_sess = ChatSession.query.filter_by(session_id=session_id).first()
     if not chat_sess:
-        # Determine automatic sequential numbering e.g. "Chat 1", "Chat 2"
+        # Determine automatic sequential numbering e.g. "Chat 1", "Chat 2" for user-friendly UI display
         existing_count = ChatSession.query.count()
         chat_sess = ChatSession(session_id=session_id, title=f"Chat {existing_count + 1}")
         db.session.add(chat_sess)
         db.session.commit()
 
-    # Persist user message to SQLite
+    # Persist user message to SQLite BEFORE graph execution to guarantee customer prompt is recorded even if agent fails
     user_msg_record = ChatMessage(
         session_id=session_id,
         role="user",
@@ -531,7 +531,7 @@ def agent_chat():
 
     reply_html = _render_chat_markdown(reply_text)
 
-    # Persist assistant message to SQLite
+    # Persist assistant response to SQLite and update session timestamp so active conversations appear at the top
     assistant_msg_record = ChatMessage(
         session_id=session_id,
         role="assistant",

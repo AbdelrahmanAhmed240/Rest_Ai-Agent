@@ -1,18 +1,11 @@
 from typing import Any, TypedDict
 import re
-
 from langgraph.graph import END, StateGraph
-
 from app.services.agent import get_history
 from app.services.vector_store import retrieve
 from app.services.tools import (
     search_products,
-    find_or_create_customer,
-    create_order,
-    edit_order,
-    cancel_order,
     track_order,
-    tool_result_text,
     recommend_products,
     query_price_info,
     _extract_order_code,
@@ -20,19 +13,14 @@ from app.services.tools import (
 from app.services.order_session import (
     get_draft,
     clear_draft,
-    update_draft,
-    add_item_to_draft,
-    remove_item_from_draft,
     calculate_draft_totals,
     get_missing_fields,
     format_draft_summary,
     commit_confirmed_order,
     parse_user_entities,
     get_upsell_suggestions,
-    upgrade_draft_combos,
     AVAILABLE_BRANCHES,
 )
-
 
 class AgentState(TypedDict, total=False):
     session_id: str
@@ -43,7 +31,6 @@ class AgentState(TypedDict, total=False):
     context: str
     tool_name: str
     tool_result: dict
-
 
 def _format_meal_includes(desc: str) -> str:
     """Extract a clean, concise comma-separated list of items included in a meal."""
@@ -78,7 +65,6 @@ def _format_meal_includes(desc: str) -> str:
     cleaned_items = [translations.get(it.strip(" :-"), it.strip(" :-")) for it in items if it.strip(" :-")]
     return ", ".join(cleaned_items) if cleaned_items else desc.replace("\n", " ").strip()
 
-
 def _format_menu_grouped(items: list[dict]) -> str:
     """Format menu products cleanly grouped by category with EGP prices and combo rules."""
     category_order = ["Meals", "Add-ons", "Sauces", "Drinks", "Extras"]
@@ -95,7 +81,6 @@ def _format_menu_grouped(items: list[dict]) -> str:
         grouped.setdefault(cat, []).append(item)
 
     sections = ["### 📋 Our Menu\n"]
-
     ordered_cats = [c for c in category_order if c in grouped] + [c for c in grouped if c not in category_order]
     for cat in ordered_cats:
         title = category_titles.get(cat, f"📦 {cat}")
@@ -121,152 +106,117 @@ def _format_menu_grouped(items: list[dict]) -> str:
 
     return "\n".join(sections).strip()
 
-
 def _route_intent(message: str, session_id: str = "") -> str:
-    text = message.strip().lower()
+    """
+    Two-path router:
+    - 'ordering': Placing an order, giving order details, confirmation, cancel, or tracking.
+    - 'information': All customer inquiries (menu, recommendations, prices, policies, RAG).
+    """
+    text = (message or "").strip().lower()
 
-    # Explicit order cancel / edit
-    cancel_signals = ["cancel", "cancel my order", "cancel order", "إلغاء"]
-    if any(signal in text for signal in cancel_signals):
-        return "order_tool"
+    # 1. Order tracking: route to ordering so track_order tool can look up DB status
+    tracking_signals = ("track", "status", "حالة", "تتبع", "where is my order", "where's my order", "فين طلبي", "وصل لفين")
+    has_order_code = bool(_extract_order_code(message))
+    if any(sig in text for sig in tracking_signals) or (has_order_code and ("order" in text or "طلب" in text)):
+        return "ordering"
 
-    edit_signals = ["edit", "change", "remove", "update", "تعديل"]
-    if any(signal in text for signal in edit_signals):
-        return "order_tool"
-
-    # Order tracking / status inquiry
-    tracking_signals = [
-        "track order", "track my order", "order status", "status of my order", "status of my meal",
-        "where is my order", "has my order been prepared", "is my order cancelled", "is my order ready",
-        "where's my order", "what's the status", "check my order", "order state",
-        "حالة الطلب", "حالة الأوردر", "حالة طلبي", "تتبع", "الطلب وصل لفين", "طلبي جاهز", "الطلب جاهز", "فين طلبي",
-        "فين الأوردر", "أوردر اتلغى", "طلب اتلغى", "حالة الأكل",
-    ]
-    if any(signal in text for signal in tracking_signals):
-        return "order_tool"
-
-    # Confirmation keywords: "confirm", "confirm last order", "place order", "yes please", "تأكيد", "أكد الطلب"
+    # 2. Confirmation signals: route to ordering to validate required fields and commit
     confirm_signals = [
-        "confirm", "confirm order", "confirm last order", "confirm my order", "place order", "place the order", "place my order",
-        "submit order", "yes confirm", "yes please",
+        "confirm", "place order", "submit order", "yes please",
         "تأكيد", "أكد", "تأكيد الطلب", "اكد الطلب", "اعتمد", "سجل الطلب", "نفذ الطلب"
     ]
-    if any(signal in text for signal in confirm_signals):
-        return "order_tool"
+    if any(sig in text for sig in confirm_signals):
+        return "ordering"
 
-    # Decline keywords for upselling or offers: "no", "no thanks", "لا شكراً", etc.
-    decline_signals = ["no", "no thanks", "no thank you", "none", "لا", "لا شكرا", "لا شكراً", "لا تمام", "تمام كده", "مش عايز", "مش عاوز", "كفاية"]
-    if any(text == sig or text.startswith(sig + " ") for sig in decline_signals) and session_id:
-        draft = get_draft(session_id)
-        if draft.get("items"):
-            return "order_tool"
+    # Inspect active draft to contextualize short answers (e.g., "no", "yes", "cash")
+    draft = get_draft(session_id) if session_id else {}
+    has_active_draft = bool(draft.get("items") and draft.get("stage") != "confirmed")
 
-    # Order summary
-    summary_signals = ["summarize my order", "summarize order", "summary of my order", "order summary", "my order", "ملخص"]
-    if any(signal in text for signal in summary_signals):
-        return "order_tool"
+    # 3. Upsell declines or accepts: prevent short answers like "no thanks" from routing to general info
+    decline_signals = ["no", "no thanks", "no thank you", "none", "لا", "لا شكرا", "لا شكراً", "لا تمام", "تمام كده", "مش عايز", "مش عاوز", "كفاية", "بس كده"]
+    combo_signals = ["make it combo", "make them combo", "add combo", "combo please", "upgrade to combo", "خليهم كومبو", "مع كومبو", "ضيف كومبو", "نعم كومبو", "عايز كومبو", "عاوز كومبو"]
+    if has_active_draft:
+        clean_text = text.strip(" .!?,")
+        if (clean_text in decline_signals or any(clean_text == s for s in decline_signals) or any(clean_text.startswith(s + " ") for s in ["no", "no thanks", "لا", "لا شكرا"])) or any(sig in text for sig in combo_signals):
+            return "ordering"
 
-    # Deterministic price comparison signals (Must take precedence over recommendation "cheap")
-    price_signals = [
-        "cheapest", "most expensive", "highest price", "lowest price",
-        "less than", "under", "cost less", "price of each", "all meal prices",
-        "أرخص", "ارخص", "أغلى", "اغلى", "أقل من", "اقل من", "تحت", "أسعار الوجبات", "سعر كل"
+    # 4. Cancellation attempt: route to ordering where policy notice or draft clearing occurs
+    if any(sig in text for sig in ("cancel", "إلغاء")):
+        return "ordering"
+
+    # Detect informational signals (questions about policies, menu, prices, recommendations, branches, hours)
+    info_question_signals = [
+        "what", "how", "where", "when", "why", "who", "which", "can i", "do you", "is there", "are there", "tell me",
+        "menu", "price", "prices", "cost", "how much", "cheapest", "expensive", "under", "recommend", "suggest",
+        "hours", "open", "close", "working hours", "branch", "branches", "location", "address of", "phone of",
+        "ingredients", "contain", "include", "policy", "fee", "fees",
+        "منيو", "قائمة", "سعر", "أسعار", "اسعار", "بكام", "تكلفة", "أرخص", "ارخص", "أغلى", "اغلى", "اقل من", "أقل من",
+        "رشح", "اقتراح", "مواعيد", "شغالين", "بيفتح", "بيقفل", "ساعات العمل", "فروع", "فرعكم", "عنوان", "أين", "فين", "مكان",
+        "مكونات", "يحتوي", "فيه", "رسوم", "سياسة", "مصاريف"
     ]
-    if any(signal in text for signal in price_signals):
-        return "restaurant_product"
+    is_explicit_info_query = any(sig in text for sig in info_question_signals) or "?" in text or "؟" in text
 
-    # Full menu / all meals queries
-    menu_signals = [
-        "menu", "full menu", "all meals", "available meals", "what meals", "list meals", "show meals",
-        "منيو", "قائمة", "كل الوجبات", "الوجبات المتاحة", "قائمة الطعام"
+    # Explicit ordering verbs
+    order_action_verbs = [
+        "place an order", "create order", "i want to order", "order now", "عاوز أطلب", "عايز أطلب", "أطلب", "اطلب", "طلب أوردر",
+        "i want", "i'd like", "give me", "bring me", "add", "عاوز", "عايز", "أريد", "اريد", "هاتلي", "ابعتلي", "وصل", "وصلني", "ضيف"
     ]
-    if any(signal in text for signal in menu_signals):
-        return "restaurant_product"
+    has_order_action = any(v in text for v in order_action_verbs) or bool(re.search(r"\bdeliver\b", text))
 
-    # Order creation / fulfillment detail signals
-    order_signals = [
-        "place an order", "create order", "i want to order", "order now", "عاوز أطلب", "أطلب", "طلب أوردر",
-        "i want", "want", "عاوز", "عايز", "أريد", "هاتلي",
-        "delivery", "delievery", "delivry", "deliver", "pickup", "dine in", "dine-in", "توصيل", "استلام", "صالة", "طاولة", "ترابيزة",
-        "cash", "visa", "كاش", "فيزا",
+    # Fulfillment detail mentions
+    fulfillment_words = [
+        "delivery", "delievery", "pickup", "dine in", "dine-in", "توصيل", "استلام", "صالة", "طاولة", "ترابيزة",
+        "cash", "visa", "كاش", "فيزا"
     ]
-    if any(signal in text for signal in order_signals):
-        return "order_tool"
+    has_fulfillment_detail = any(w in text for w in fulfillment_words)
 
-    # If the session already has items in draft, treat ongoing messages (giving details) as order flow
-    if session_id:
-        draft = get_draft(session_id)
-        if draft.get("items"):
-            # Check if user is answering a detail question
-            return "order_tool"
+    # Check for phone number pattern or delivery address keyword
+    has_phone = bool(re.search(r"(?:(?:\+?20)|0)?1[0125]\d{8}\b", text))
+    has_address = bool("شارع" in text or "street" in text or "st." in text)
 
-    # Recommendations
-    recommendation_signals = ["recommend", "suggest", "best", "hungry", "what should i get", "spicy", "ترشيح", "رشحلي", "اقتراح"]
-    if any(signal in text for signal in recommendation_signals):
-        return "recommendation"
+    # 4. If message has explicit ordering action or fulfillment details
+    if has_order_action or has_phone or (has_fulfillment_detail and not is_explicit_info_query):
+        return "ordering"
 
-    # Restaurant / Menu queries
-    restaurant_signals = [
-        "branch", "branches", "فروع", "فرع", "location", "address", "hour", "hours", "مواعيد",
-        "food", "dish", "dishes", "price", "prices", "سعر", "أسعار",
-        "shawarma", "pasta", "drink", "drinks", "broasted", "strips",
-        "meal", "meals", "chicken", "sauce", "sauces", "add-on", "addon", "extras",
-        "بروستد", "ستربس", "وجبة", "وجبات", "صوص", "صوصات", "إضافات",
-        "can i see", "show me", "what do you have", "what's on", "list", "comes with", "what comes"
-    ]
-    if any(signal in text for signal in restaurant_signals):
-        return "restaurant_product"
+    # If user provided a fulfillment detail (like "delivery" or "cash") but combined with a question:
+    # e.g., "Do you have delivery to Nasr City?" -> is_explicit_info_query is True -> routes to information!
+    # e.g., "delivery please" -> has_fulfillment_detail is True, is_explicit_info_query is False -> routes to ordering!
 
-    return "general"
+    # 5. Active draft continuation
+    if has_active_draft:
+        # If the user is currently building an order and asks an informational question,
+        # route to information so rag_node can answer, while preserving the draft in session.
+        if is_explicit_info_query:
+            return "information"
+        # Otherwise, the user is answering a requested detail (name, address, table, etc.)
+        return "ordering"
 
+    # Default: Information & Questions path (handled by RAG + database knowledge)
+    return "information"
 
 def router_node(state: AgentState) -> AgentState:
+    """Simple Router: Classifies message as 'ordering' or 'information'."""
     session_id = state.get("session_id", "default")
     message = state.get("message", "")
     state["intent"] = _route_intent(message, session_id=session_id)
     return state
 
-
-def recommendation_node(state: AgentState) -> AgentState:
-    message = state.get("message", "")
-    rec_result = recommend_products(message, limit=3)
-    pieces = []
-    if rec_result.get("ok") and rec_result.get("items"):
-        lines = ["### 🌟 Recommended Options\n"]
-        for item in rec_result["items"]:
-            price = item.get("price", 0.0)
-            combo = item.get("combo_price", 0.0)
-            cat = item.get("category", "")
-            if cat == "Meals":
-                includes = _format_meal_includes(item.get("description") or "")
-                lines.append(f"**{item['name']} — {price:.0f} EGP**")
-                if includes:
-                    lines.append(f"* Includes: {includes}.")
-                if combo and combo > 0:
-                    lines.append(f"* Combo upgrade: +{combo:.0f} EGP for fries and a drink.")
-                sections.append("") if False else None
-                lines.append("")
-            else:
-                lines.append(f"* **{item['name']}** ({cat}) — {price:.0f} EGP")
-        pieces.append("\n".join(lines).strip())
-
-    if not pieces:
-        pieces.append("I couldn't find a suitable recommendation right now.")
-
-    state["context"] = "\n\n".join(pieces)
-    state["tool_name"] = "recommend_products"
-    state["tool_result"] = rec_result
-    return state
-
-
 def rag_node(state: AgentState) -> AgentState:
+    """
+    Unified Information Path (Path A):
+    Handles all questions using:
+    1. Deterministic price comparison calculations (cheapest, most expensive, under X EGP).
+    2. Recommendations grounded in real product data.
+    3. Full menu listings grouped by category from SQLite.
+    4. Semantic RAG retrieval from ChromaDB knowledge base (branches, hours, policies, details).
+    """
     from app.models.product import Product
 
     message = state.get("message", "")
-    text_lower = message.lower()
+    text_lower = (message or "").lower()
     pieces = []
 
-    # 1. Deterministic Price Comparison Queries
+    # 1. Deterministic price comparison questions (exact calculation in SQL prevents hallucinated math)
     price_info = query_price_info(message)
     if price_info.get("ok"):
         pieces.append(price_info.get("text", ""))
@@ -275,11 +225,34 @@ def rag_node(state: AgentState) -> AgentState:
         state["tool_result"] = price_info
         return state
 
-    # 2. Specific "All Meals" query
-    is_meals_query = any(kw in text_lower for kw in (
-        "all meals", "available meals", "what meals", "list meals", "show meals", "الوجبات", "كل الوجبات"
-    ))
-    if is_meals_query:
+    # 2. Recommendation inquiries (grounded directly in available menu products)
+    rec_signals = ["recommend", "suggest", "best", "hungry", "what should i get", "spicy", "ترشيح", "رشحلي", "اقتراح"]
+    if any(sig in text_lower for sig in rec_signals):
+        rec_result = recommend_products(message, limit=3)
+        if rec_result.get("ok") and rec_result.get("items"):
+            lines = ["### 🌟 Recommended Options\n"]
+            for item in rec_result["items"]:
+                price = item.get("price", 0.0)
+                combo = item.get("combo_price", 0.0)
+                cat = item.get("category", "")
+                if cat == "Meals":
+                    includes = _format_meal_includes(item.get("description") or "")
+                    lines.append(f"**{item['name']} — {price:.0f} EGP**")
+                    if includes:
+                        lines.append(f"* Includes: {includes}.")
+                    if combo and combo > 0:
+                        lines.append(f"* Combo upgrade: +{combo:.0f} EGP for fries and a drink.")
+                    lines.append("")
+                else:
+                    lines.append(f"* **{item['name']}** ({cat}) — {price:.0f} EGP")
+            pieces.append("\n".join(lines).strip())
+            state["context"] = "\n\n".join(pieces)
+            state["tool_name"] = "recommend_products"
+            state["tool_result"] = rec_result
+            return state
+
+    # 3. Specific 'All Meals' query: formatted from active DB records to reflect real-time stock
+    if any(kw in text_lower for kw in ("all meals", "available meals", "what meals", "list meals", "show meals", "الوجبات", "كل الوجبات")):
         meals = Product.query.filter(Product.category == "Meals", Product.is_available == True).order_by(Product.price.asc()).all()
         lines = ["### 🍗 Available Meals\n"]
         for m in meals:
@@ -296,85 +269,62 @@ def rag_node(state: AgentState) -> AgentState:
         state["tool_result"] = {"ok": True, "count": len(meals)}
         return state
 
-    # 3. Menu/listing queries: return ALL products grouped into categories
-    is_menu_query = any(kw in text_lower for kw in (
-        "menu", "can i see", "what do you have", "what's on",
-        "show me", "i want to see", "list", "available", "منيو", "قائمة",
-    ))
-    is_sauce_query = any(kw in text_lower for kw in ("sauce", "sauces", "صوص", "صوصات", "الصوصات"))
-    is_addon_query = any(kw in text_lower for kw in ("add-on", "addon", "addons", "side", "sides", "إضافة", "إضافات"))
-
-    # 4. Restaurant knowledge queries: use RAG retrieval (hours, branches, policies, etc.)
-    is_knowledge_query = any(kw in text_lower for kw in (
-        "hour", "open", "close", "branch", "location", "address",
-        "policy", "delivery", "payment", "visa", "cash",
-        "area", "region", "where", "find", "contact",
-        "phone", "social", "facebook", "مواعيد", "فروع", "توصيل",
-    ))
-
-    if is_knowledge_query:
-        hits = retrieve(message, top_k=3)
-        for hit in hits:
-            content = hit.get("content") or ""
-            if content.strip():
-                pieces.append(content.strip())
-
+    # 4. Full menu query: formatted into categorized sections with EGP pricing and combo rules
+    is_menu_query = any(kw in text_lower for kw in ("menu", "can i see", "what do you have", "what's on", "show me", "منيو", "قائمة"))
     if is_menu_query:
         product_results = search_products("", limit=50)
         if product_results.get("ok") and product_results.get("items"):
             pieces.append(_format_menu_grouped(product_results["items"]))
-    elif is_sauce_query:
-        product_results = search_products("sauce", limit=20)
-        if product_results.get("ok") and product_results.get("items"):
-            lines = ["### 🥫 Our Sauces\n"]
-            for item in product_results["items"]:
-                price = item.get("price", 0.0)
-                lines.append(f"* **{item['name']}** — {price:.0f} EGP")
-            pieces.append("\n".join(lines))
-    elif is_addon_query:
-        product_results = search_products("add-on", limit=20)
-        if product_results.get("ok") and product_results.get("items"):
-            lines = ["### ➕ Our Add-ons & Sides\n"]
-            for item in product_results["items"]:
-                price = item.get("price", 0.0)
-                lines.append(f"* **{item['name']}** — {price:.0f} EGP")
-            pieces.append("\n".join(lines))
-    elif not is_knowledge_query:
-        product_results = search_products(message, limit=5)
-        if product_results.get("ok") and product_results.get("items"):
-            lines = []
-            for item in product_results["items"]:
-                price = item.get("price", 0.0)
-                combo = item.get("combo_price", 0.0)
-                cat = item.get("category", "")
-                if cat == "Meals":
-                    includes = _format_meal_includes(item.get("description") or "")
-                    lines.append(f"**{item['name']} — {price:.0f} EGP**")
-                    if includes:
-                        lines.append(f"* Includes: {includes}.")
-                    if combo and combo > 0:
-                        lines.append(f"* Combo upgrade: +{combo:.0f} EGP for fries and a drink.")
-                    lines.append("")
-                else:
-                    lines.append(f"* **{item['name']}** ({cat}) — {price:.0f} EGP")
-            pieces.append("\n".join(lines).strip())
+            state["context"] = "\n\n".join(pieces)
+            state["tool_name"] = "menu_listing"
+            state["tool_result"] = {"ok": True, "count": product_results.get("count", 0)}
+            return state
 
+    # 5. Semantic RAG retrieval from ChromaDB: filters by score <= 0.72 to drop irrelevant noise
+    hits = retrieve(message, top_k=4)
+    relevant_hits = [h for h in hits if h.get("score") is None or h.get("score") <= 0.72]
+    for hit in relevant_hits:
+        content = hit.get("content") or ""
+        if content.strip():
+            pieces.append(content.strip())
+
+    # Augment with live structured product details if query matches products in SQLite (handles custom DB items)
+    product_results = search_products(message, limit=3)
+    if product_results.get("ok") and product_results.get("items"):
+        p_lines = []
+        for item in product_results["items"]:
+            price = item.get("price", 0.0)
+            combo = item.get("combo_price", 0.0)
+            cat = item.get("category", "")
+            if cat == "Meals":
+                includes = _format_meal_includes(item.get("description") or "")
+                p_lines.append(f"**{item['name']} — {price:.0f} EGP**")
+                if includes:
+                    p_lines.append(f"* Includes: {includes}.")
+                if combo and combo > 0:
+                    p_lines.append(f"* Combo upgrade: +{combo:.0f} EGP for fries and a drink.")
+                p_lines.append("")
+            else:
+                p_lines.append(f"* **{item['name']}** ({cat}) — {price:.0f} EGP")
+        if p_lines:
+            pieces.append("\n".join(p_lines).strip())
+
+    # Explicit fallback prevents hallucination when query is unsupported or out-of-domain
     if not pieces:
         pieces.append("I don't have specific information for that request.")
 
     state["context"] = "\n\n".join(pieces)
+    state["tool_name"] = "rag_knowledge"
+    state["tool_result"] = {"hits_count": len(relevant_hits)}
     return state
 
-
 def _is_confirmation_intent(text: str, draft: dict[str, Any]) -> bool:
-    """Check if message represents an order confirmation intent.
-    Matches explicit confirmation phrases anytime, or natural affirmative responses
-    when the draft order is awaiting confirmation or all required fields are present.
-    """
+    """Check if message represents an order confirmation intent."""
     t = (text or "").strip().lower()
     if not t:
         return False
 
+    # Explicit confirmation keywords always trigger confirmation attempt
     explicit_confirm = [
         "confirm", "confirm order", "confirm last order", "confirm my order", "place order", "place the order", "place my order",
         "submit order", "submit my order", "complete order", "finish order",
@@ -384,7 +334,7 @@ def _is_confirmation_intent(text: str, draft: dict[str, Any]) -> bool:
     if any(sig in t for sig in explicit_confirm):
         return True
 
-    # When the draft is already awaiting confirmation or has items with no missing fields
+    # Contextual confirmation: affirmative words only count when draft is ready and awaiting confirmation
     is_awaiting = draft.get("stage") == "awaiting_confirmation"
     has_items = bool(draft.get("items"))
     missing = get_missing_fields(draft) if has_items else ["items"]
@@ -400,7 +350,6 @@ def _is_confirmation_intent(text: str, draft: dict[str, Any]) -> bool:
             return True
 
     return False
-
 
 def _format_confirmed_order_response(result: dict[str, Any], draft: dict[str, Any]) -> str:
     """Format the authoritative confirmed order message strictly using persisted database data."""
@@ -460,40 +409,47 @@ def _format_confirmed_order_response(result: dict[str, Any], draft: dict[str, An
     lines.append(f"Thank you for choosing our restaurant! You can track your order status anytime using order code `{order_code}`.")
     return "\n".join(lines)
 
-
 def order_tool_node(state: AgentState) -> AgentState:
     """
-    Intelligent Order Tool Node:
-    - Parses conversational entities (order type, customer name, phone, destination, payment).
-    - Maintains the session's active draft order.
-    - Conducts Guided Upselling (combo upgrades, drinks, sauces) before customer info collection.
-    - Handles final confirmation and commits to SQLite DB.
-    - Asks only for missing required fields one at a time.
+    Order Operations Path (Path B):
+    - Manages draft lifecycle: parses entities, adds items, calculates totals.
+    - Conducts Guided Upselling before collecting customer fulfillment details.
+    - Asks for missing required fields sequentially.
+    - Validates and executes transactional order confirmation and tracking.
+    - Handles mixed messages by retrieving RAG context if informational questions are present.
     """
     session_id = state.get("session_id", "default")
     message = state.get("message", "")
-    text_lower = message.strip().lower()
+    text_lower = (message or "").strip().lower()
 
-    # 1. Parse entities from the current message into the session draft
+    # 1. Parse entities into draft
     parse_user_entities(session_id, message)
     draft = get_draft(session_id)
 
     result: dict = {"ok": True}
     context_lines = []
 
-    # 2. Check for Order Tracking / Status Inquiry
-    tracking_words = [
-        "track", "status", "where is my order", "where's my order", "has my order",
-        "is my order", "حالة", "تتبع", "وصل لفين", "جاهز", "فين طلبي", "فين الأوردر",
-    ]
-    is_tracking_inquiry = any(k in text_lower for k in tracking_words)
+    # Mixed message support: If customer also asked an informational question (e.g. ingredients, prices, policies, branches)
+    info_triggers = ["have", "contain", "ingredients", "what is", "how much", "price", "fee", "cost", "branch", "branches", "hours", "سعر", "مكونات", "فيه", "بكام", "فرع", "فروع", "مواعيد", "رسوم"]
+    has_mixed_info = any(k in text_lower for k in info_triggers) or "?" in text_lower or "؟" in text_lower
+    hits = []
+    if has_mixed_info:
+        hits = retrieve(message, top_k=3)
+        if hits:
+            context_lines.append("### ℹ️ Knowledge Base Context:\n" + "\n".join(h["content"] for h in hits))
+            context_lines.append("IMPORTANT FOR MIXED INQUIRY: The customer asked a question alongside their order. You MUST directly answer their question using the Knowledge Base Context above, while also confirming their order draft.")
+
+    # 2. Check for Order Tracking: look up real-time DB status by code and bypass LLM to prevent status hallucinations
+    # (Exclude cancellation attempts so that requests to cancel a placed order are met with the non-cancellation policy notice)
+    is_cancel_intent = any(k in text_lower for k in ("cancel", "إلغاء"))
+    tracking_words = ["track", "status", "where is my order", "where's my order", "where is order", "where's order", "حالة", "تتبع", "وصل لفين", "جاهز", "فين طلبي"]
     explicit_code = _extract_order_code(message)
     target_code = explicit_code or draft.get("confirmed_order_code")
+    is_tracking_inquiry = not is_cancel_intent and (any(k in text_lower for k in tracking_words) or bool(explicit_code))
 
     if is_tracking_inquiry:
         if target_code:
-            phone_val = draft.get("customer_phone")
-            track_res = track_order(order_code=target_code, phone=phone_val)
+            track_res = track_order(order_code=target_code)
             if track_res.get("ok"):
                 cur_status = track_res.get("status", "Unknown")
                 c_name = track_res.get("customer_name") or "Valued Customer"
@@ -526,32 +482,37 @@ def order_tool_node(state: AgentState) -> AgentState:
                 state["context"] = resp_text
                 return state
         else:
-            resp_text = (
-                "Please provide your **Order Code** (e.g., `ORD-12345`) so I can retrieve "
-                "the real-time status of your order from our database."
-            )
+            resp_text = "Please provide your **Order Code** (e.g., `ORD-12345`) so I can retrieve the real-time status of your order from our database."
             state["tool_name"] = "track_order"
             state["tool_result"] = {"ok": False, "missing": "order_code"}
             state["response"] = resp_text
             state["context"] = resp_text
             return state
 
-    # 3. Check for Cancel Order
+    # 3. Check for Cancellation attempt: placed orders cannot be cancelled once preparation begins
     if any(k in text_lower for k in ("cancel", "إلغاء")):
         order_code = _extract_order_code(message)
-        phone = draft.get("customer_phone") or ""
-        if order_code and phone:
-            result = cancel_order(order_code=order_code, phone=phone)
-            context_lines.append(tool_result_text(result))
+        if order_code or draft.get("confirmed_order_code"):
+            resp_text = (
+                "❌ **Order Cancellation is Not Supported**: "
+                "Once an order has been confirmed and placed, it cannot be cancelled as preparation begins immediately in the kitchen. "
+                "You can track your order status using your Order Code."
+            )
+            state["tool_name"] = "cancellation_notice"
+            state["tool_result"] = {"ok": False, "error": "Order cancellation is not supported."}
+            state["response"] = resp_text
+            state["context"] = resp_text
+            return state
         else:
             clear_draft(session_id)
-            context_lines.append("Your draft order has been cancelled.")
-        state["tool_name"] = "cancel_order"
-        state["tool_result"] = result
-        state["context"] = "\n\n".join(context_lines)
-        return state
+            resp_text = "Your unconfirmed draft order has been cleared."
+            state["tool_name"] = "clear_draft"
+            state["tool_result"] = {"ok": True, "action": "draft_cleared"}
+            state["response"] = resp_text
+            state["context"] = resp_text
+            return state
 
-    # 3. Check for Confirmation
+    # 4. Check for Confirmation: validate completeness before committing transaction to database
     if _is_confirmation_intent(message, draft):
         if not draft.get("items"):
             result = {"ok": False, "error": "Cannot confirm empty order."}
@@ -561,6 +522,7 @@ def order_tool_node(state: AgentState) -> AgentState:
             state["context"] = state["response"]
             return state
 
+        # Prevent premature confirmation during upselling stage until customer accepts or declines
         if draft.get("stage") == "offering_extras" and not draft.get("upsell_declined"):
             result = {"ok": False, "error": "Order still in upselling stage."}
             state["tool_name"] = "confirm_order"
@@ -569,6 +531,7 @@ def order_tool_node(state: AgentState) -> AgentState:
             state["context"] = state["response"]
             return state
 
+        # Block confirmation if any fulfillment detail required by order_type is missing
         missing = get_missing_fields(draft)
         if missing:
             result = {
@@ -586,18 +549,24 @@ def order_tool_node(state: AgentState) -> AgentState:
             state["context"] = state["response"]
             return state
 
+        # All details valid: commit atomic transaction to SQLite DB and return authoritative code
         result = commit_confirmed_order(session_id)
         state["tool_name"] = "confirm_order"
         state["tool_result"] = result
         if result.get("ok"):
-            state["response"] = _format_confirmed_order_response(result, draft)
+            resp = _format_confirmed_order_response(result, draft)
+            # If customer asked a question while confirming, attach the answer to receipt
+            if has_mixed_info and hits:
+                kb_text = "\n".join(h["content"].strip() for h in hits[:2])
+                resp += f"\n\n---\n### ℹ️ Additional Information:\n{kb_text}"
+            state["response"] = resp
             state["context"] = state["response"]
         else:
             state["response"] = f"❌ Order placement failed: {result.get('error', 'Database error')}. Please try again."
             state["context"] = state["response"]
         return state
 
-    # 4. Draft Ongoing Flow: Item Selection, Guided Upselling, & Details Collection
+    # 5. Ongoing Draft Flow: Item Selection, Guided Upselling, & Details Collection
     calc = calculate_draft_totals(draft)
     context_lines.append(format_draft_summary(draft))
 
@@ -605,6 +574,7 @@ def order_tool_node(state: AgentState) -> AgentState:
         draft["stage"] = "selecting_items"
         context_lines.append("\nCustomer has not added any items yet. Ask what meal they would like to order.")
     elif not draft.get("upsell_offered") and not draft.get("upsell_declined"):
+        # Guided upselling: suggest combos, drinks, or sauces once before asking fulfillment details
         suggestions = get_upsell_suggestions(draft)
         if suggestions.get("needs_upsell"):
             draft["stage"] = "offering_extras"
@@ -631,7 +601,7 @@ def order_tool_node(state: AgentState) -> AgentState:
         else:
             draft["stage"] = "collecting_details"
 
-    # 5. Missing fulfillment details collection
+    # 6. Sequential details collection: ask for only one missing field at a time for natural pacing
     missing = get_missing_fields(draft)
     if missing:
         draft["stage"] = "collecting_details"
@@ -647,7 +617,7 @@ def order_tool_node(state: AgentState) -> AgentState:
         first_missing = missing[0]
         context_lines.append(f"\nNext required information to ask for: {field_names.get(first_missing, first_missing)}. Ask for this field clearly.")
     else:
-        # All required details complete!
+        # All required fields present: instruct LLM to present full summary and request explicit confirmation
         draft["stage"] = "awaiting_confirmation"
         context_lines.append(
             "\nAll required order details are complete! Present the final order summary with itemized prices, "
@@ -668,14 +638,20 @@ def order_tool_node(state: AgentState) -> AgentState:
     state["context"] = "\n\n".join(context_lines)
     return state
 
-
 def llm_node(state: AgentState) -> AgentState:
+    """Invokes Google Gemini with the grounded context prepared by RAG or order tools."""
     from app.services.agent import reply
 
-    # If authoritative response already generated by deterministic tool node
+    # If authoritative response was already generated deterministically (e.g. tracking/confirmation), bypass LLM
     if state.get("response"):
         session_id = state.get("session_id", "default")
-        state["history"] = get_history(session_id)
+        message = state.get("message", "")
+        hist = get_history(session_id)
+        # Record turn in conversational history so subsequent LLM calls have full context
+        if message and state.get("response"):
+            hist.append({"role": "user", "content": message})
+            hist.append({"role": "assistant", "content": state["response"]})
+        state["history"] = hist
         return state
 
     session_id = state.get("session_id", "default")
@@ -683,7 +659,7 @@ def llm_node(state: AgentState) -> AgentState:
     context = state.get("context", "")
     response = reply(session_id=session_id, user_message=message, context=context)
 
-    # Hallucination guard: prevent LLM from fabricating order numbers without a DB commit
+    # Hallucination guard: intercept fake order numbers if LLM hallucinates confirmation without DB commit
     draft = get_draft(session_id)
     if not draft.get("confirmed_order_code") and (
         "ORD-" in response or "order has been placed" in response.lower() or "تم تأكيد طلبك" in response
@@ -693,49 +669,43 @@ def llm_node(state: AgentState) -> AgentState:
             f"{summary}\n\n"
             f"Please reply **confirm** (or **تأكيد**) to place your order!"
         )
+        hist = get_history(session_id)
+        if hist and hist[-1].get("role") == "assistant":
+            hist[-1]["content"] = response
 
     state["response"] = response
     state["history"] = get_history(session_id)
     return state
 
-
-def output_node(state: AgentState) -> AgentState:
-    return state
-
-
 def build_graph():
+    """
+    Builds the simplified 2-path LangGraph state machine:
+    Router -> [rag OR order_tool] -> llm -> END
+    """
     workflow = StateGraph(AgentState)
     workflow.add_node("router", router_node)
-    workflow.add_node("recommendation", recommendation_node)
     workflow.add_node("rag", rag_node)
     workflow.add_node("order_tool", order_tool_node)
     workflow.add_node("llm", llm_node)
-    workflow.add_node("output", output_node)
 
     workflow.set_entry_point("router")
     workflow.add_conditional_edges(
         "router",
-        lambda state: state.get("intent", "general"),
+        lambda state: state.get("intent", "information"),
         {
-            "general": "llm",
-            "restaurant_product": "rag",
-            "recommendation": "recommendation",
-            "order_tool": "order_tool",
-            "future_tool_request": "order_tool",
+            "information": "rag",
+            "ordering": "order_tool",
         },
     )
-    workflow.add_edge("recommendation", "llm")
     workflow.add_edge("rag", "llm")
     workflow.add_edge("order_tool", "llm")
-    workflow.add_edge("llm", "output")
-    workflow.add_edge("output", END)
+    workflow.add_edge("llm", END)
     return workflow.compile()
-
 
 _graph = build_graph()
 
-
 def run(session_id: str, message: str) -> dict:
+    """Entry point invoked by Flask admin_chat route."""
     return _graph.invoke({
         "session_id": session_id,
         "message": message,
