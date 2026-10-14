@@ -105,13 +105,123 @@ def clear_draft(session_id: str) -> None:
         del _drafts[session_id]
     _save_draft_to_db(session_id, None)
 
+def _is_negated_preceding(preceding: str) -> bool:
+    """Check if the text immediately preceding a matched keyword indicates negation within the local clause."""
+    # Split by clause boundaries (punctuation, contrastive conjunctions) to evaluate only the immediate clause
+    clause = re.split(r"[,.;!?]|\b(?:but|instead|بس|لكن|بدل)\b", preceding)[-1].strip()
+    if not clause:
+        return False
+    # Negation pattern allowing optional filler words (e.g. 'don't have a', 'not a', 'مش معايا')
+    neg_pat = r"\b(?:no|not|don'?t|never|without|hardly|معيش|مش|لا|مفيش|بدون|من\s*غير|بلاش)\b(?:\s+\w+){0,3}\s*$"
+    return bool(re.search(neg_pat, clause, re.IGNORECASE))
+
+def _detect_fulfillment_type(text: str) -> Optional[str]:
+    """
+    Detect fulfillment type (delivery, pickup, dine_in) from customer text.
+    Handles negation (e.g., 'no delivery, pickup please'), avoids partial-word collisions
+    (e.g., 'vegetable' -> dine_in), and ignores question/inquiry comparisons.
+    """
+    t = (text or "").lower().strip()
+    if not t:
+        return None
+
+    # Comparative or undecided questions should not prematurely pick a channel
+    if ("?" in t or "؟" in t) and re.search(r"\b(?:or|أم|ولا|لو)\b", t):
+        return None
+
+    pats = {
+        "delivery": [
+            r"\b(?:delivery|deliver|delievery|delivry|home\s+delivery)\b",
+            r"(?:توصيل|دليفري|على\s*البيت|للمنزل)",
+        ],
+        "pickup": [
+            r"\b(?:pickup|pick\s*up|takeaway|take\s*away)\b",
+            r"(?:استلام|من\s*الفرع|تيك\s*اواي|تيك\s*أواي|سفري|هاجي\s*اخده|هعدي\s*اخده)",
+        ],
+        "dine_in": [
+            r"\b(?:dine[- ]?in|dinein|on[- ]?site|eat[- ]?in)\b",
+            r"\btable\s*(?:#|number|no\.?|\d+)\b",
+            r"\b(?:at\s+the\s+table)\b",
+            r"(?:صالة|في\s*المطعم|داخل\s*المطعم|على\s*الطاولة|ترابيزة|طاولة)",
+        ],
+    }
+
+    detected_positive = set()
+    detected_negative = set()
+
+    for channel, regex_list in pats.items():
+        for pat in regex_list:
+            for m in re.finditer(pat, t):
+                start = m.start()
+                preceding = t[max(0, start - 35):start]
+                if _is_negated_preceding(preceding):
+                    detected_negative.add(channel)
+                else:
+                    detected_positive.add(channel)
+
+    effective = detected_positive - detected_negative
+    if len(effective) == 1:
+        return next(iter(effective))
+
+    return None
+
+def _detect_payment_method(text: str) -> Optional[str]:
+    """
+    Detect payment method (Cash, Visa, Vodafone Cash).
+    Handles negation (e.g. 'don't have credit card, pay cash'), and distinguishes
+    mobile-wallet methods (Vodafone Cash) from physical cash.
+    """
+    t = (text or "").lower().strip()
+    if not t:
+        return None
+
+    # 1. Supported Mobile Wallet (Vodafone Cash, Orange Cash, InstaPay)
+    wallet_pat = r"\b(?:vodafone\s*cash|orange\s*cash|etisalat\s*cash|smart\s*wallet|instapay)\b|(?:فودافون\s*كاش|اورنج\s*كاش|اتصالات\s*كاش|وي\s*باي|انستاباي|محفظة\s*الكترونية)"
+    wallet_match = re.search(wallet_pat, t)
+    if wallet_match:
+        preceding = t[max(0, wallet_match.start() - 35):wallet_match.start()]
+        if not _is_negated_preceding(preceding):
+            return "Vodafone Cash"
+
+    # 2. Check Card / Visa vs Cash with negation handling
+    card_pat = r"\b(?:credit\s*card|debit\s*card|visa|mastercard|card|credit|debit)\b|(?:فيزا|كارت|بطاقة|ماستركارد)"
+    t_no_wallet = re.sub(wallet_pat, " ", t)
+    cash_pat = r"\b(?:cash|cash\s*on\s*delivery|cod)\b|(?:كاش|نقد|نقدي|عند\s*الاستلام)"
+
+    card_pos, card_neg = False, False
+    cash_pos, cash_neg = False, False
+
+    for m in re.finditer(card_pat, t_no_wallet):
+        preceding = t_no_wallet[max(0, m.start() - 35):m.start()]
+        if _is_negated_preceding(preceding):
+            card_neg = True
+        else:
+            card_pos = True
+
+    for m in re.finditer(cash_pat, t_no_wallet):
+        preceding = t_no_wallet[max(0, m.start() - 35):m.start()]
+        if _is_negated_preceding(preceding):
+            cash_neg = True
+        else:
+            cash_pos = True
+
+    effective_card = card_pos and not card_neg
+    effective_cash = cash_pos and not cash_neg
+
+    if effective_cash and not effective_card:
+        return "Cash"
+    if effective_card and not effective_cash:
+        return "Visa"
+
+    return None
+
 @_with_app_context
 def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
     """
     Extract fulfillment details from message and update draft:
     - Order type: Delivery / Pickup / Dine-in
     - Phone number: Egyptian 10-11 digit numbers
-    - Payment method: Cash / Visa
+    - Payment method: Cash / Visa / Vodafone Cash
     - Branch: matches known branches
     - Table: table number / table id
     - Name: name patterns
@@ -124,13 +234,12 @@ def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
     changes = {}
 
     # 0. Check for upselling decline or acceptance
-    # If customer says 'no thanks' to combo/drink upsells, transition stage to detail collection without losing cart items
     decline_signals = [
         "no", "no thanks", "no thank you", "nope", "nothing", "neither",
         "لا", "لا شكرا", "لا شكراً", "لا تمام", "تمام كده", "مش عايز", "مش عاوز", "كفاية", "بس كده", "لا مش محتاج", "مش محتاج"
     ]
     clean_text = text_lower.strip(" .!?,")
-    if (clean_text in decline_signals or any(clean_text == s for s in decline_signals) or any(clean_text.startswith(s + " ") for s in ["no", "no thanks", "لا", "لا شكرا", "لا شكراً"])) and draft.get("items"):
+    if (clean_text in decline_signals or any(clean_text.startswith(s + " ") for s in ["no", "no thanks", "لا", "لا شكرا", "لا شكراً"])) and draft.get("items"):
         draft["upsell_declined"] = True
         draft["upsell_offered"] = True
         draft["stage"] = "collecting_details"
@@ -143,31 +252,17 @@ def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
         if upgrade_res.get("upgraded_count", 0) > 0:
             changes["combo_upgraded"] = True
 
-    # 1. Order type extraction: determines which destination fields (address, branch, or table) will be mandatory
-    delivery_words = ["delivery", "delievery", "delivry", "deliver", "توصيل", "دليفري", "على البيت", "للمنزل", "home delivery"]
-    pickup_words = ["pickup", "pick up", "استلام", "من الفرع", "تيك اواي", "تيك أواي", "takeaway", "take away"]
-    dinein_words = ["dine in", "dine-in", "dinein", "صالة", "في المطعم", "داخل المطعم", "على الطاولة", "ترابيزة", "طاولة", "table"]
+    # 1. Order type extraction: safely handles negation and word boundaries
+    detected_type = _detect_fulfillment_type(text)
+    if detected_type:
+        update_draft(session_id, order_type=detected_type)
+        changes["order_type"] = detected_type
 
-    if any(w in text_lower for w in delivery_words):
-        update_draft(session_id, order_type="delivery")
-        changes["order_type"] = "delivery"
-    elif any(w in text_lower for w in pickup_words):
-        update_draft(session_id, order_type="pickup")
-        changes["order_type"] = "pickup"
-    elif any(w in text_lower for w in dinein_words):
-        update_draft(session_id, order_type="dine_in")
-        changes["order_type"] = "dine_in"
-
-    # Refresh draft after type update
-    draft = get_draft(session_id)
-
-    # 2. Payment method
-    if any(w in text_lower for w in ["visa", "card", "credit", "فيزا", "كارت", "بطاقة"]):
-        update_draft(session_id, payment_method="Visa")
-        changes["payment_method"] = "Visa"
-    elif any(w in text_lower for w in ["cash", "كاش", "نقد", "نقدي", "عند الاستلام"]):
-        update_draft(session_id, payment_method="Cash")
-        changes["payment_method"] = "Cash"
+    # 2. Payment method: distinguishes Cash, Visa, and mobile wallet methods with negation safety
+    detected_payment = _detect_payment_method(text)
+    if detected_payment:
+        update_draft(session_id, payment_method=detected_payment)
+        changes["payment_method"] = detected_payment
 
     # 3. Phone number: matches Egyptian mobile format (010, 011, 012, 015 followed by 8 digits) with optional +20 country prefix
     phone_match = re.search(r"(?:(?:\+?20)|0)?1[0125]\d{8}\b", text)
@@ -178,7 +273,7 @@ def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
 
     # 4. Table number: extracts table ID for dine-in orders while guarding against phone or price numbers
     table_match = re.search(r"(?:table|ترابيزة|طاولة|طاوله)\s*(?:رقم|number|#)?\s*(\d+|[a-zA-Z]\d*)", text, re.IGNORECASE)
-    if not table_match and (draft.get("order_type") == "dine_in" or any(w in text_lower for w in dinein_words)):
+    if not table_match and (draft.get("order_type") == "dine_in" or detected_type == "dine_in"):
         # Standalone short answer like "12", "T12", "A5" when system specifically asked for table number
         m_standalone = re.fullmatch(r"\s*(?:#|no\.?|رقم)?\s*(\d+|[a-zA-Z]\d+)\s*", text, re.IGNORECASE)
         if m_standalone and not phone_match:
@@ -220,7 +315,7 @@ def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
                 "delivery", "delievery", "pickup", "dine", "dine-in", "توصيل", "استلام", "صالة", "ترابيزة", "طاولة",
             ]
             seg_has_order = any(w in seg_lower for w in order_intent_words)
-            if not seg_has_order and not draft.get("customer_name") and 2 <= len(seg.split()) <= 4 and not any(ch.isdigit() for ch in seg):
+            if not seg_has_order and not draft.get("customer_name") and 1 <= len(seg.split()) <= 4 and not any(ch.isdigit() for ch in seg):
                 update_draft(session_id, customer_name=seg)
                 changes["customer_name"] = seg
 
@@ -232,6 +327,11 @@ def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
         "delivery", "delievery", "pickup", "dine", "dine-in", "dinein", "dining", "cash", "visa", "order", "want", "menu", "confirm", "yes", "table", "branch",
         "شارع", "street", "عاوز", "عايز", "أطلب", "اطلب", "أريد", "اريد", "توصيل", "استلام", "صالة", "ترابيزة", "طاولة",
         "بسمتيو", "بروستد", "ستربس", "بريك", "فتة", "فته", "وجبة", "وجبه", "كومبو", "combo", "meal", "هاتلي", "مع", "بدون",
+        "no", "no thanks", "no thank you", "none", "thanks", "thank you", "لا", "لا شكرا", "لا شكراً", "لا تمام", "تمام", "مش عايز", "مش عاوز", "كفاية", "بس كده", "شكرا", "شكراً",
+    ]
+    common_menu_names = [
+        "basmatio", "basmetio", "cheddar", "cheder", "strips", "broasted", "break", "fatta", "fries", "rice", "coleslaw", "pepsi", "drink", "water",
+        "بسمتيو", "شيدر", "بريك", "ستربس", "فتة", "بطاطس", "أرز", "رز", "ثومية", "كول سلو", "باربكيو", "رانش", "سويت تشيلي", "مشروب", "بيبسي", "مياه", "وجبة"
     ]
     if not draft.get("customer_name"):
         # Matches "my name is X", "i'm X", "اسمي X", "أنا X"
@@ -241,22 +341,22 @@ def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
             cand_name = re.split(r"(?:\band\b|\bو\b|phone|رقم|cash|visa|كاش|فيزا|address|عنوان|street|شارع)", cand_name, flags=re.IGNORECASE)[0].strip()
             # Filter out common stop words and order phrases
             cand_lower = cand_name.lower()
-            if len(cand_name) >= 2 and not any(w in cand_lower for w in order_stop_words):
+            if len(cand_name) >= 2 and not any(w in cand_lower for w in order_stop_words) and not any(m in cand_lower for m in common_menu_names):
                 update_draft(session_id, customer_name=cand_name)
                 changes["customer_name"] = cand_name
         elif draft.get("order_type") and not draft.get("customer_name"):
             # Standalone name answer (e.g. user just replies "Ahmed" or "كريم")
             words = text.split()
             if 1 <= len(words) <= 3 and len(text) >= 2 and not phone_match and not any(ch.isdigit() for ch in text):
-                if not any(w in text_lower for w in order_stop_words):
+                if not any(w in text_lower for w in order_stop_words) and not any(m in text_lower for m in common_menu_names) and _detect_fulfillment_type(text) is None:
                     update_draft(session_id, customer_name=text)
                     changes["customer_name"] = text
 
     # 7. Delivery address (especially if order_type is delivery or message mentions address / street)
     if not draft.get("delivery_address"):
         addr_match = re.search(r"(?:address(?:\s+is)?|عنواني|العنوان|delivery to|deliver to|توصيل\s+إلى|توصيل\s+الي)\s*[:=]?\s*([^,\n\r]+)", text, re.IGNORECASE)
-        if not addr_match and ("شارع" in text or "street" in text_lower or "st." in text_lower):
-            addr_match = re.search(r"(\d*[\s\w,.\-#]+(?:street|st\.?|شارع)[\s\w,.\-#]*)", text, re.IGNORECASE)
+        if not addr_match and any(w in text_lower for w in ("شارع", "street", "st.", "st ", "road", "عمارة", "building", "floor", "دور", "شقة", "وابور", "wabour")):
+            addr_match = re.search(r"(\d*[\s\w,.\-#]+(?:street|st\.?|شارع|building|عمارة|road|طريق|حي|منطقة|وابور|wabour)[\s\w,.\-#]*)", text, re.IGNORECASE)
         if addr_match:
             cand_addr = addr_match.group(1).strip()
             # Clean trailing stop words like 'my name is...', 'phone...', 'cash'
@@ -264,12 +364,13 @@ def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
             if len(cand_addr) >= 3:
                 update_draft(session_id, delivery_address=cand_addr)
                 changes["delivery_address"] = cand_addr
-        elif draft.get("order_type") == "delivery" and not draft.get("delivery_address"):
+        elif draft.get("order_type") == "delivery" and not draft.get("delivery_address") and not changes.get("customer_name"):
             # If user is directly answering the address question with a standalone address
-            if not any(k in text_lower for k in ["order", "menu", "cash", "visa", "confirm", "recommend", "delivery"]):
-                if len(text) >= 3 and any(ch.isalpha() for ch in text) and not phone_match:
-                    update_draft(session_id, delivery_address=text)
-                    changes["delivery_address"] = text
+            if _detect_fulfillment_type(text) is None and not any(k in text_lower for k in ["order", "menu", "cash", "visa", "confirm", "recommend", "delivery", "delievery", "pickup", "dine", "no thanks", "لا شكرا"]):
+                if not any(m in text_lower for m in common_menu_names) and not any(w in text_lower for w in order_stop_words):
+                    if len(text) >= 3 and any(ch.isalpha() for ch in text) and not phone_match:
+                        update_draft(session_id, delivery_address=text)
+                        changes["delivery_address"] = text
 
     # 8. Product and item additions
     # Check known menu products in DB sorted longest first to avoid partial overlap
@@ -279,6 +380,7 @@ def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
         english_aliases = {
             "break": "وجبة بريك",
             "basmatio": "بسمتيو",
+            "basmetio": "بسمتيو",
             "strips 3": "وجبة ستربس 3 قطع",
             "strips 5": "وجبة ستربس 5 قطع",
             "strips": "وجبة ستربس 3 قطع",
@@ -290,7 +392,21 @@ def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
             "pepsi": "مشروب",
             "drink": "مشروب",
             "water": "مياه",
+            "cheddar": "شيدر",
+            "cheder": "شيدر",
+            "cheddar sauce": "شيدر",
+            "صوص شيدر": "شيدر",
+            "جبنة شيدر": "شيدر",
+            "جبنه شيدر": "شيدر",
         }
+        arabic_quantities = {
+            "واحد": 1, "واحدة": 1, "واحده": 1,
+            "اتنين": 2, "اثنين": 2,
+            "تلاتة": 3, "ثلاثة": 3,
+            "اربعة": 4, "أربعة": 4,
+            "خمسة": 5,
+        }
+        arabic_num_pat = r"واحد|واحدة|واحده|اتنين|اثنين|تلاتة|ثلاثة|اربعة|أربعة|خمسة"
         products_sorted = sorted(products, key=lambda x: len(x.name), reverse=True)
         matched_spans = []
 
@@ -303,37 +419,62 @@ def parse_user_entities(session_id: str, message: str) -> dict[str, Any]:
 
         for target_term, p in targets:
             term_lower = target_term.lower()
-            if term_lower in text_lower:
-                idx = text_lower.find(term_lower)
-                span = (idx, idx + len(term_lower))
-                if any(s[0] <= span[0] and span[1] <= s[1] for s in matched_spans):
+            if term_lower.isascii() and term_lower.isalpha():
+                m_term = re.search(rf"\b{re.escape(term_lower)}\b", text_lower)
+                if not m_term:
                     continue
-                matched_spans.append(span)
+                idx = m_term.start()
+            else:
+                if term_lower not in text_lower:
+                    continue
+                idx = text_lower.find(term_lower)
 
-                qty = 1
-                qty_match = re.search(rf"(\d+)\s*(?:x|from|of|قطع|قطعة|وجبات|وجبة)?\s*{re.escape(target_term)}", text, re.IGNORECASE)
-                if not qty_match:
-                    qty_match = re.search(rf"{re.escape(target_term)}\s*(?:x|عدد)?\s*(\d+)", text, re.IGNORECASE)
-                if qty_match:
+            span = (idx, idx + len(term_lower))
+            if any(s[0] <= span[0] and span[1] <= s[1] for s in matched_spans):
+                continue
+            matched_spans.append(span)
+
+            qty = 1
+            qty_match = re.search(rf"(?:(\d+)|(?:و\s*)?({arabic_num_pat}))\s*(?:x|from|of|قطع|قطعة|وجبات|وجبة)?\s*{re.escape(target_term)}", text, re.IGNORECASE)
+            if not qty_match:
+                qty_match = re.search(rf"{re.escape(target_term)}\s*(?:x|عدد)?\s*(?:(\d+)|(?:و\s*)?({arabic_num_pat}))", text, re.IGNORECASE)
+            if qty_match:
+                digit_grp = qty_match.group(1)
+                word_grp = qty_match.group(2)
+                if digit_grp:
                     try:
-                        qty = max(1, int(qty_match.group(1)))
+                        qty = max(1, int(digit_grp))
                     except Exception:
                         qty = 1
+                elif word_grp:
+                    qty = arabic_quantities.get(word_grp.strip(), 1)
 
-                is_combo = bool("combo" in text_lower or "كومبو" in text_lower)
-                # Protect against adding items to cart when the user is only asking an informational question
-                # e.g., "what is the price of basmatio?" should NOT add Basmatio to the draft cart
-                is_question = any(q in text_lower for q in ("?", "؟", "what", "how much", "can i see", "do you have", "what is", "سعر", "بكام", "فيه", "مكونات"))
-                order_words = ["order", "i want", "add", "place", "أطلب", "عاوز", "عايز", "أريد", "اريد", "هاتلي", "ضيف", "مع"]
-                has_order_verb = any(w in text_lower for w in order_words)
-                has_explicit_qty = bool(qty_match)
-                is_explicit_order = (has_order_verb or has_explicit_qty) and not (is_question and not has_order_verb)
-                if is_explicit_order:
-                    add_item_to_draft(session_id, product_name=p.name, quantity=qty, is_combo=is_combo)
-                    changes["added_product"] = p.name
+            is_combo = bool("combo" in text_lower or "كومبو" in text_lower)
+            # Protect against adding items to cart when user is asking an informational question
+            inquiry_markers = (
+                "?", "؟", "what", "how", "can i see", "do you have", "tell me", "know", "ask", "see",
+                "ingredients", "contain", "include", "price", "cost", "details", "comes with",
+                "سعر", "اسعار", "أسعار", "بكام", "تكلفة", "مكونات", "يحتوي", "فيه", "عبارة عن",
+                "ايه", "إيه", "تفاصيل", "عايز اعرف", "عاوز اعرف", "حابب اعرف", "اسأل عن", "اسال عن", "ممكن اعرف", "بيجي معاه"
+            )
+            is_inquiry = any(q in text_lower for q in inquiry_markers)
+            order_verbs = [
+                "order", "add", "bring me", "give me", "deliver",
+                "أطلب", "اطلب", "هاتلي", "ابعتلي", "ضيف", "وصلني"
+            ]
+            has_want_to_order = bool(re.search(r"\b(?:i\s*want|i'd\s*like|عاوز|عايز|أريد|اريد)\b(?!\s+(?:to\s+)?(?:know|ask|see|check|understand|inquire|اعرف|اسأل|اسال))", text_lower))
+            has_order_verb = any(w in text_lower for w in order_verbs) or has_want_to_order
+            has_explicit_qty = bool(qty_match)
+            # Also allow item addition if user is currently in the ordering flow
+            is_in_ordering = bool(draft.get("order_type") or draft.get("stage") in ("selecting_items", "offering_extras") or draft.get("items"))
+            is_explicit_order = (has_order_verb or has_explicit_qty or is_in_ordering) and not is_inquiry
+            if is_explicit_order:
+                add_item_to_draft(session_id, product_name=p.name, quantity=qty, is_combo=is_combo)
+                changes["added_product"] = p.name
     except Exception:
         pass
 
+    _save_draft_to_db(session_id, draft)
     return changes
 
 def get_missing_fields(draft: dict[str, Any]) -> list[str]:

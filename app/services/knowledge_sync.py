@@ -15,19 +15,16 @@ def _slugify(text: str) -> str:
     # Convert a title into a safe Markdown filename.
     text = text.lower()
     text = re.sub(r"[^a-z0-9_\u0600-\u06FF]+", "-", text)
-    text = text.strip("-")
-    return text or "knowledge"
+    return text.strip("-") or "knowledge"
 
 def _derive_title_and_category(path: Path, content: str):
     # tries to determine the title/category from the markdown file, if not found, it will use the filename as title and "General" as category
     title = path.stem.replace("-", " ").title()
-    category = "General"
     for line in content.splitlines():
-        line = line.strip()
-        if line.startswith("# "):
-            title = line.lstrip("# ").strip()
+        if line.strip().startswith("# "):
+            title = line.strip()[2:].strip()
             break
-    return title, category
+    return title, "General"
 
 def _write_markdown(path: Path, content: str) -> None:
     # Write text to a Markdown file.
@@ -125,18 +122,22 @@ def rebuild_vector_index() -> int:
     collection = get_collection()
     return collection.count()
 
-def create_item_from_dashboard(title: str, category: str, content: str) -> KnowledgeItem:
-    # Create a new Markdown file from the dashboard and sync it.
-    _ensure_knowledge_dir()
-    base_slug = _slugify(title)
-    rel = f"{base_slug}.md"
+def _generate_unique_markdown_path(base_name: str) -> tuple[Path, str]:
+    """Generates an available unique markdown filename and path within knowledge dir."""
+    stem = base_name[:-3] if base_name.endswith(".md") else base_name
+    rel = f"{stem}.md"
     path = _KNOWLEDGE_DIR / rel
     counter = 1
     while path.exists():
-        rel = f"{base_slug}-{counter}.md"
+        rel = f"{stem}-{counter}.md"
         path = _KNOWLEDGE_DIR / rel
         counter += 1
+    return path, rel
 
+def create_item_from_dashboard(title: str, category: str, content: str) -> KnowledgeItem:
+    # Create a new Markdown file from the dashboard and sync it.
+    _ensure_knowledge_dir()
+    path, rel = _generate_unique_markdown_path(_slugify(title))
     _write_markdown(path, content or "")
     item = KnowledgeItem(
         title=title,
@@ -167,20 +168,15 @@ def create_markdown_source_from_admin(filename: str, title: str, category: str, 
     if not safe.endswith(".md"):
         safe = f"{safe}.md"
 
-    path = _KNOWLEDGE_DIR / safe
-    counter = 1
     base = safe[:-3]
-    while path.exists():
-        safe = f"{base}-{counter}.md"
-        path = _KNOWLEDGE_DIR / safe
-        counter += 1
+    path, rel = _generate_unique_markdown_path(base)
 
     _write_markdown(path, content or "")
     item = KnowledgeItem(
         title=title or base.replace("-", " ").title(),
         category=category or "General",
         content=content or "",
-        source_path=safe,
+        source_path=rel,
     )
     db.session.add(item)
     db.session.commit()

@@ -229,12 +229,7 @@
                     <div class="col-md-8 col-lg-9 d-flex flex-column bg-white">
                         <!-- Active Session Header -->
                         <div class="p-3 border-bottom d-flex justify-content-between align-items-center bg-white">
-                            <div class="d-flex align-items-center gap-2">
-                                <span class="fw-bold fs-6" id="active-session-title">Chat 1</span>
-                                <button type="button" class="btn btn-sm btn-link text-muted p-0" id="btn-rename-active-chat" title="Rename this conversation">
-                                    <i class="bi bi-pencil-square"></i>
-                                </button>
-                            </div>
+                            <span class="fw-bold fs-6" id="active-session-title">Chat 1</span>
                             <span class="badge bg-light text-muted border" id="active-session-id-display"></span>
                         </div>
 
@@ -262,363 +257,309 @@
 {% block scripts %}
 {{ super() }}
 <script>
-(function() {
-    var form = document.getElementById('agent-chat-form');
-    var input = document.getElementById('agent-message');
-    var sessionInput = document.getElementById('agent-session-id');
-    var container = document.getElementById('agent-messages');
-    var sendBtn = document.getElementById('agent-send-btn');
-    var btnNewChat = document.getElementById('btn-new-chat');
-    var sessionsList = document.getElementById('sessions-list');
-    var sessionsCount = document.getElementById('sessions-count');
-    var activeTitleDisplay = document.getElementById('active-session-title');
-    var activeIdDisplay = document.getElementById('active-session-id-display');
-    var btnRename = document.getElementById('btn-rename-active-chat');
+(function () {
+    // 1. Get HTML elements
+    const form = document.getElementById('agent-chat-form');
+    const input = document.getElementById('agent-message');
+    const sessionInput = document.getElementById('agent-session-id');
+    const messages = document.getElementById('agent-messages');
+    const sendBtn = document.getElementById('agent-send-btn');
+    const newChatBtn = document.getElementById('btn-new-chat');
+    const sessionsList = document.getElementById('sessions-list');
+    const sessionsCount = document.getElementById('sessions-count');
+    const activeTitle = document.getElementById('active-session-title');
+    const activeId = document.getElementById('active-session-id-display');
 
-    var currentSessionId = localStorage.getItem('rest_agent_current_session') || '';
-    var busy = false;
-    var currentController = null;
+    // 2. Remember the selected chat
+    let currentSessionId =
+        localStorage.getItem('rest_agent_current_session') || '';
 
-    function renderMarkdownSafely(text) {
-        if (window.DOMPurify && window.marked) {
-            try {
-                return window.DOMPurify.sanitize(window.marked.parse(text));
-            } catch (e) {}
+    let busy = false;
+
+    // 3. Send requests to Flask and read JSON responses
+    async function api(url, options = {}) {
+        const response = await fetch(url, options);
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || 'Request failed');
         }
-        return null;
+
+        return data;
     }
 
+    // 4. Display a message
     function appendMessage(role, text, html) {
-        var wrapper = document.createElement('div');
-        wrapper.className = role === 'user' ? 'mb-3 text-end' : 'mb-3 text-start';
-        var label = document.createElement('div');
-        label.className = 'small fw-semibold mb-1 ' + (role === 'user' ? 'text-primary' : 'text-dark');
+        const wrapper = document.createElement('div');
+        wrapper.className = role === 'user'
+            ? 'mb-3 text-end'
+            : 'mb-3 text-start';
+
+        const label = document.createElement('div');
+        label.className = 'small fw-semibold mb-1';
         label.textContent = role === 'user' ? 'You' : 'Agent';
-        var bubble = document.createElement('div');
+
+        const bubble = document.createElement('div');
 
         if (role === 'user') {
-            bubble.className = 'p-2 px-3 rounded-4 bg-primary text-white d-inline-block text-start shadow-sm';
+            bubble.className =
+                'p-2 px-3 rounded-4 bg-primary text-white d-inline-block text-start';
             bubble.textContent = text;
             bubble.style.whiteSpace = 'pre-wrap';
             bubble.style.wordBreak = 'break-word';
         } else {
-            bubble.className = 'p-3 rounded-3 bg-white border shadow-sm chat-markdown';
-            if (html) {
-                bubble.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
+            bubble.className =
+                'p-3 rounded-3 bg-white border shadow-sm chat-markdown';
+
+            // Display safe HTML if the backend supplied it
+            if (html && window.DOMPurify) {
+                bubble.innerHTML = window.DOMPurify.sanitize(html);
+            } else if (window.marked && window.DOMPurify) {
+                bubble.innerHTML = window.DOMPurify.sanitize(
+                    window.marked.parse(text)
+                );
             } else {
-                var clientRendered = renderMarkdownSafely(text);
-                if (clientRendered) {
-                    bubble.innerHTML = clientRendered;
-                } else {
-                    var div = document.createElement('div');
-                    div.textContent = text;
-                    bubble.innerHTML = div.innerHTML.replace(/\n/g, '<br>');
-                }
+                // Fallback: display plain text safely
+                bubble.textContent = text;
+                bubble.style.whiteSpace = 'pre-wrap';
             }
         }
 
         wrapper.appendChild(label);
         wrapper.appendChild(bubble);
-        container.appendChild(wrapper);
-        container.scrollTop = container.scrollHeight;
+        messages.appendChild(wrapper);
+
+        messages.scrollTop = messages.scrollHeight;
     }
 
-    function showTypingIndicator() {
-        var wrapper = document.createElement('div');
-        wrapper.id = 'agent-typing';
-        wrapper.className = 'mb-2 text-start';
-        var label = document.createElement('div');
-        label.className = 'small fw-semibold text-dark';
-        label.textContent = 'Agent';
-        var bubble = document.createElement('div');
-        bubble.className = 'p-2 rounded bg-white border';
-        bubble.innerHTML = '<span class="spinner-border spinner-border-sm text-warning" role="status"></span>&nbsp;Typing...';
-        wrapper.appendChild(label);
-        wrapper.appendChild(bubble);
-        container.appendChild(wrapper);
-        container.scrollTop = container.scrollHeight;
-    }
+    // 5. Load messages from one chat
+    async function loadMessages(sessionId) {
+        if (!sessionId) return;
 
-    function removeTypingIndicator() {
-        var el = document.getElementById('agent-typing');
-        if (el) el.remove();
-    }
+        messages.textContent = 'Loading messages...';
 
-    // Load messages for a specific session
-    function loadSessionMessages(sId) {
-        if (!sId) return;
-        container.innerHTML = '<div class="text-center py-4"><span class="spinner-border spinner-border-sm text-secondary"></span> Loading messages...</div>';
-        fetch('/agent/sessions/' + encodeURIComponent(sId) + '/messages')
-            .then(function(res) {
-                if (!res.ok) throw new Error('Failed to load session');
-                return res.json();
-            })
-            .then(function(data) {
-                container.innerHTML = '';
-                var msgs = data.messages || [];
-                if (msgs.length === 0) {
-                    container.innerHTML = '<div class="text-muted small text-center my-4">No messages yet. Send a message to start!</div>';
-                } else {
-                    msgs.forEach(function(m) {
-                        appendMessage(m.role, m.content, m.html);
-                    });
-                }
-                container.scrollTop = container.scrollHeight;
-            })
-            .catch(function(err) {
-                container.innerHTML = '<div class="text-danger small text-center my-4">Failed to load chat history.</div>';
+        try {
+            const data = await api(
+                '/agent/sessions/' +
+                encodeURIComponent(sessionId) +
+                '/messages'
+            );
+
+            messages.innerHTML = '';
+
+            if (!data.messages || data.messages.length === 0) {
+                messages.textContent = 'No messages yet. Start chatting!';
+                return;
+            }
+
+            data.messages.forEach(function (message) {
+                appendMessage(
+                    message.role,
+                    message.content,
+                    message.html
+                );
             });
+        } catch (error) {
+            messages.textContent = 'Failed to load chat history.';
+        }
     }
 
-    // Select active session
-    function selectSession(sId, title) {
-        currentSessionId = sId;
-        sessionInput.value = sId;
-        localStorage.setItem('rest_agent_current_session', sId);
-        if (activeTitleDisplay) activeTitleDisplay.textContent = title || 'Chat';
-        if (activeIdDisplay) activeIdDisplay.textContent = sId;
+    // 6. Select a chat
+    function selectSession(sessionId, title) {
+        currentSessionId = sessionId;
+        sessionInput.value = sessionId;
 
-        // Update active class in sidebar
-        var items = sessionsList.querySelectorAll('.session-item');
-        items.forEach(function(el) {
-            if (el.getAttribute('data-id') === sId) {
-                el.classList.add('active', 'bg-warning', 'text-dark', 'fw-semibold');
-                el.classList.remove('bg-transparent');
+        localStorage.setItem(
+            'rest_agent_current_session',
+            sessionId
+        );
+
+        if (activeTitle) activeTitle.textContent = title || 'Chat';
+        if (activeId) activeId.textContent = sessionId;
+
+        // Highlight the selected chat
+        document.querySelectorAll('.session-item').forEach(function (item) {
+            const selected = item.dataset.id === sessionId;
+
+            item.classList.toggle('active', selected);
+            item.classList.toggle('bg-warning', selected);
+            item.classList.toggle('text-dark', selected);
+            item.classList.toggle('fw-semibold', selected);
+            item.classList.toggle('bg-transparent', !selected);
+        });
+
+        loadMessages(sessionId);
+    }
+
+    // 7. Load all chats into the sidebar
+    async function loadSessions(keepActive = true) {
+        try {
+            const sessions = await api('/agent/sessions');
+
+            sessionsList.innerHTML = '';
+            if (sessionsCount) {
+                sessionsCount.textContent = sessions.length;
+            }
+
+            sessions.forEach(function (session) {
+                const item = document.createElement('div');
+
+                item.className =
+                    'list-group-item border-0 py-2 px-3 small ' +
+                    'd-flex justify-content-between align-items-center session-item';
+
+                item.dataset.id = session.session_id;
+                item.style.cursor = 'pointer';
+
+                // Create the title safely
+                const title = document.createElement('span');
+                title.className = 'text-truncate flex-grow-1 me-2';
+                title.textContent = session.title || 'Chat';
+
+                // Show message count
+                const count = document.createElement('span');
+                count.className = 'badge bg-secondary';
+                count.textContent = session.message_count || 0;
+
+                // Select chat when clicked
+                item.addEventListener('click', function () {
+                    selectSession(session.session_id, session.title);
+                });
+
+                item.appendChild(title);
+                item.appendChild(count);
+                sessionsList.appendChild(item);
+            });
+
+            // Restore the previous chat if it still exists
+            const savedSession = sessions.find(function (session) {
+                return session.session_id === currentSessionId;
+            });
+
+            if (keepActive && savedSession) {
+                selectSession(
+                    savedSession.session_id,
+                    savedSession.title
+                );
+            } else if (sessions.length > 0) {
+                selectSession(
+                    sessions[0].session_id,
+                    sessions[0].title
+                );
             } else {
-                el.classList.remove('active', 'bg-warning', 'text-dark', 'fw-semibold');
-                el.classList.add('bg-transparent');
+                currentSessionId = '';
+                sessionInput.value = '';
+                if (activeTitle) activeTitle.textContent = 'No chat selected';
+                if (activeId) activeId.textContent = '';
+                messages.textContent = 'Create a new chat to get started.';
             }
-        });
-
-        loadSessionMessages(sId);
+        } catch (error) {
+            console.error('Failed to load chats:', error);
+        }
     }
 
-    // Load all persisted sessions
-    function loadSessions(keepActive) {
-        fetch('/agent/sessions')
-            .then(function(res) { return res.json(); })
-            .then(function(sessions) {
-                if (sessionsCount) sessionsCount.textContent = sessions.length;
-                sessionsList.innerHTML = '';
-                if (!sessions || sessions.length === 0) return;
+    // 8. Create a new chat
+    if (newChatBtn) {
+        newChatBtn.addEventListener('click', async function () {
+            newChatBtn.disabled = true;
 
-                sessions.forEach(function(s) {
-                    var itemWrapper = document.createElement('div');
-                    itemWrapper.className = 'list-group-item list-group-item-action border-0 py-2 px-3 small d-flex justify-content-between align-items-center session-item position-relative';
-                    itemWrapper.setAttribute('data-id', s.session_id);
-                    itemWrapper.style.cursor = 'pointer';
-
-                    itemWrapper.innerHTML =
-                        '<div class="text-truncate me-2 session-click-area flex-grow-1">' +
-                            '<i class="bi bi-chat-left-text me-2"></i>' +
-                            '<span class="session-title-text">' + (s.title || 'Chat') + '</span>' +
-                        '</div>' +
-                        '<div class="d-flex align-items-center gap-1">' +
-                            '<span class="badge bg-secondary-subtle text-secondary rounded-pill me-1">' + (s.message_count || 0) + '</span>' +
-                            '<button type="button" class="btn btn-sm btn-link text-danger p-0 delete-session-btn" title="Delete conversation" style="opacity: 0.6; line-height: 1;">' +
-                                '<i class="bi bi-trash"></i>' +
-                            '</button>' +
-                        '</div>';
-
-                    // Clicking on session title/area selects it
-                    var clickArea = itemWrapper.querySelector('.session-click-area');
-                    clickArea.addEventListener('click', function(ev) {
-                        ev.preventDefault();
-                        selectSession(s.session_id, s.title);
-                    });
-
-                    // Delete button handler
-                    var delBtn = itemWrapper.querySelector('.delete-session-btn');
-                    delBtn.addEventListener('mouseenter', function() { delBtn.style.opacity = '1'; });
-                    delBtn.addEventListener('mouseleave', function() { delBtn.style.opacity = '0.6'; });
-                    delBtn.addEventListener('click', function(ev) {
-                        ev.preventDefault();
-                        ev.stopPropagation();
-                        var chatName = s.title || 'this chat';
-                        if (!confirm('Are you sure you want to permanently delete "' + chatName + '" and all its messages?')) {
-                            return;
-                        }
-
-                        delBtn.disabled = true;
-                        fetch('/agent/sessions/' + encodeURIComponent(s.session_id), {
-                            method: 'DELETE'
-                        })
-                        .then(function(res) {
-                            if (!res.ok) {
-                                return res.json().then(function(errData) {
-                                    throw new Error(errData.error || ('HTTP error ' + res.status));
-                                });
-                            }
-                            return res.json();
-                        })
-                        .then(function() {
-                            // If the deleted session was the active one, clear from localStorage
-                            if (currentSessionId === s.session_id) {
-                                localStorage.removeItem('rest_agent_current_session');
-                                currentSessionId = '';
-                            }
-                            // Reload sessions list
-                            loadSessions(true);
-                        })
-                        .catch(function(err) {
-                            delBtn.disabled = false;
-                            alert('Failed to delete chat: ' + err.message);
-                        });
-                    });
-
-                    sessionsList.appendChild(itemWrapper);
-                });
-
-                // Pick initial or fallback session
-                var activeFound = sessions.find(function(s) { return s.session_id === currentSessionId; });
-                if (keepActive && activeFound) {
-                    selectSession(activeFound.session_id, activeFound.title);
-                } else if (sessions.length > 0) {
-                    selectSession(sessions[0].session_id, sessions[0].title);
-                } else {
-                    // All sessions were deleted, automatically create a fresh one
-                    if (btnNewChat) btnNewChat.click();
-                }
-            })
-            .catch(function(err) {
-                console.error('Error loading sessions:', err);
-            });
-    }
-
-    // New Chat handler
-    if (btnNewChat) {
-        btnNewChat.addEventListener('click', function() {
-            btnNewChat.disabled = true;
-            fetch('/agent/sessions', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({})
-            })
-            .then(function(res) { return res.json(); })
-            .then(function(newSess) {
-                btnNewChat.disabled = false;
-                loadSessions(false);
-                setTimeout(function() {
-                    selectSession(newSess.session_id, newSess.title);
-                }, 100);
-            })
-            .catch(function(err) {
-                btnNewChat.disabled = false;
-                alert('Failed to create new chat: ' + err.message);
-            });
-        });
-    }
-
-    // Rename chat handler
-    if (btnRename) {
-        btnRename.addEventListener('click', function() {
-            if (!currentSessionId) return;
-            var currentTitle = activeTitleDisplay.textContent.trim();
-            var newName = prompt('Enter a new name for this conversation:', currentTitle);
-            if (newName && newName.trim() && newName.trim() !== currentTitle) {
-                fetch('/agent/sessions/' + encodeURIComponent(currentSessionId) + '/rename', {
+            try {
+                const session = await api('/agent/sessions', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({title: newName.trim()})
-                })
-                .then(function(res) { return res.json(); })
-                .then(function(updated) {
-                    if (activeTitleDisplay) activeTitleDisplay.textContent = updated.title;
-                    loadSessions(true);
-                })
-                .catch(function(err) {
-                    alert('Failed to rename: ' + err.message);
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
                 });
+
+                currentSessionId = session.session_id;
+                await loadSessions(true);
+            } catch (error) {
+                alert('Failed to create chat: ' + error.message);
+            } finally {
+                newChatBtn.disabled = false;
             }
         });
     }
 
-    // Submit message handler
-    form.addEventListener('submit', function(event) {
+    // 9. Send a message to the agent
+    form.addEventListener('submit', async function (event) {
         event.preventDefault();
+
         if (busy) return;
-        var message = input.value.trim();
+
+        const message = input.value.trim();
+        const sessionId = sessionInput.value;
+
         if (!message) return;
 
-        var sId = sessionInput.value;
-        if (!sId) {
-            alert('Please select or create a chat session first.');
+        if (!sessionId) {
+            alert('Please create or select a chat first.');
             return;
         }
 
         busy = true;
         input.disabled = true;
-        input.placeholder = 'Waiting for response...';
         sendBtn.disabled = true;
         sendBtn.textContent = 'Sending...';
 
+        // Display the user's message immediately
         appendMessage('user', message);
         input.value = '';
-        showTypingIndicator();
 
-        var controller = new AbortController();
-        currentController = controller;
+        // Cancel the request if it takes longer than two minutes
+        const controller = new AbortController();
+        const timeout = setTimeout(function () {
+            controller.abort();
+        }, 120000);
 
-        var timeout = setTimeout(function() {
-            if (currentController === controller) {
-                controller.abort();
-            }
-        }, 120000); // 120s timeout
+        try {
+            const data = await api('/agent/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    message: message
+                }),
+                signal: controller.signal
+            });
 
-        fetch('/agent/chat', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                session_id: sId,
-                message: message
-            }),
-            signal: controller.signal
-        })
-        .then(function(res) {
-            if (!res.ok) throw new Error('HTTP error ' + res.status);
-            return res.json();
-        })
-        .then(function(data) {
-            clearTimeout(timeout);
-            removeTypingIndicator();
             if (data.error) {
                 appendMessage('agent', 'Error: ' + data.error);
             } else if (data.message) {
                 appendMessage('agent', data.message, data.html);
             } else {
-                appendMessage('agent', '(No response received)');
+                appendMessage('agent', 'No response received.');
             }
-            // Refresh session list to update message count badge
-            loadSessions(true);
-        })
-        .catch(function(err) {
-            clearTimeout(timeout);
-            removeTypingIndicator();
-            if (err.name === 'AbortError') {
+
+            await loadSessions(true);
+        } catch (error) {
+            if (error.name === 'AbortError') {
                 appendMessage('agent', 'Request timed out. Please try again.');
             } else {
-                appendMessage('agent', 'Request failed: ' + err.message);
+                appendMessage('agent', 'Request failed: ' + error.message);
             }
-        })
-        .finally(function() {
+        } finally {
+            clearTimeout(timeout);
+
             busy = false;
             input.disabled = false;
-            input.placeholder = 'Ask about menu, order food, or track an order...';
             sendBtn.disabled = false;
             sendBtn.textContent = 'Send';
-            currentController = null;
-            container.scrollTop = container.scrollHeight;
-        });
-    });
+            input.focus();
 
-    input.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && busy) {
-            e.preventDefault();
+            messages.scrollTop = messages.scrollHeight;
         }
     });
 
-    // Initialize sessions on page load
+    // 10. Prevent Enter from submitting again while waiting
+    input.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' && busy) {
+            event.preventDefault();
+        }
+    });
+
+    // 11. Start the chat interface
     loadSessions(true);
+
 })();
 </script>
 {% endblock %}

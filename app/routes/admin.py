@@ -443,56 +443,19 @@ def rebuild_vectors():
         flash(f"Vector rebuild failed: {exc}", "error")
     return redirect(url_for("admin.knowledge"))
 
-def normalize_chat_markdown(text: str) -> str:
-    """Ensure markdown is clean, unescaped, and properly formatted with block breaks."""
-    if not text:
-        return ""
-    import re
-    t = text.strip()
-    if "\\n" in t and "\n" not in t:
-        t = t.replace("\\n", "\n")
-    # Protect code blocks
-    code_blocks = []
-    def _save_cb(m):
-        code_blocks.append(m.group(0))
-        return f"__CODE_BLOCK_{len(code_blocks)-1}__"
-
-    t = re.sub(r"```[\s\S]*?```", _save_cb, t)
-    t = re.sub(r"`[^`\n]+`", _save_cb, t)
-
-    # Strip backslash escapes on markdown punctuation
-    t = re.sub(r"\\+([#*_\-\[\]\(\)])", r"\1", t)
-
-    # Insert newlines before headings if not at start of line
-    t = re.sub(r"([^\n])\s+(#{2,6}\s+)", r"\1\n\n\2", t)
-    # Insert newlines after headings if followed immediately by product/text
-    t = re.sub(r"(#{2,6}\s+[^\n]+?)\s+(\*\*[^*\n]+?\*\*)", r"\1\n\n\2", t)
-    # Insert newlines before bold product entries
-    t = re.sub(r"([^\n])\s+(\*\*[^*\n]+?(?:—|-|:)[^*\n]+?\*\*)", r"\1\n\n\2", t)
-    # Insert newlines before bullet items
-    t = re.sub(r"([^\n])\s+([*\-]\s+)", r"\1\n\2", t)
-
-    # Restore code blocks
-    for i, cb in enumerate(code_blocks):
-        t = t.replace(f"__CODE_BLOCK_{i}__", cb)
-
-    t = re.sub(r"\n{3,}", "\n\n", t)
-    return t.strip()
-
 def _render_chat_markdown(text: str) -> str:
     """Render markdown into clean, sanitized HTML for chat display.
     Disables raw HTML tags to prevent XSS attacks while preserving all styling.
     """
     if not text:
         return ""
-    cleaned_text = normalize_chat_markdown(text)
     try:
         import markdown_it
         md = markdown_it.MarkdownIt("commonmark", {"html": False, "breaks": True})
-        return md.render(cleaned_text)
+        return md.render(text)
     except Exception:
         import html
-        return html.escape(cleaned_text).replace("\n", "<br>")
+        return html.escape(text).replace("\n", "<br>")
 
 # Sends a user message through the LangGraph AI agent and returns its response.
 @admin_bp.route("/agent/chat", methods=["POST"])
@@ -587,41 +550,3 @@ def get_session_messages(session_id):
         return jsonify({"error": "Session not found"}), 404
     msgs = [m.to_dict() for m in sess.messages]
     return jsonify({"session": sess.to_dict(), "messages": msgs})
-
-@admin_bp.route("/agent/sessions/<session_id>/rename", methods=["POST"])
-def rename_chat_session(session_id):
-    """Rename a chat session without changing its history or identifier."""
-    data = request.get_json(silent=True) or {}
-    new_title = data.get("title", "").strip()
-    if not new_title:
-        return jsonify({"error": "Title cannot be empty"}), 400
-    sess = ChatSession.query.filter_by(session_id=session_id).first()
-    if not sess:
-        return jsonify({"error": "Session not found"}), 404
-    sess.title = new_title
-    db.session.commit()
-    return jsonify(sess.to_dict())
-
-@admin_bp.route("/agent/sessions/<session_id>", methods=["DELETE", "POST"])
-def delete_chat_session(session_id):
-    """
-    Permanently delete a chat session and its associated messages.
-    Also clears in-memory draft and conversation history for that session.
-    """
-    sess = ChatSession.query.filter_by(session_id=session_id).first()
-    if not sess:
-        return jsonify({"error": "Session not found"}), 404
-
-    try:
-        from app.services.order_session import clear_draft
-        from app.services.agent import _conversations
-        clear_draft(session_id)
-        if session_id in _conversations:
-            del _conversations[session_id]
-
-        db.session.delete(sess)
-        db.session.commit()
-        return jsonify({"ok": True, "message": f"Chat session '{session_id}' deleted successfully."})
-    except Exception as exc:
-        db.session.rollback()
-        return jsonify({"error": str(exc)}), 500

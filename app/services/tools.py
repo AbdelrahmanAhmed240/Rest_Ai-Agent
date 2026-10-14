@@ -31,7 +31,6 @@ def _normalize_egyptian_phone(value: str) -> str:
 
 def _extract_order_code(text: str) -> str | None:
     import re
-
     # Match standard order codes like 'ORD-12345' even if user omits hyphen or adds extra spaces
     match = re.search(r"\bORD[-\s]*(\d{5,})\b", text or "", re.IGNORECASE)
     if match:
@@ -248,12 +247,8 @@ def find_or_create_customer(name: str, phone: str, address: str = "") -> dict:
 
         # Query across standard, un-prefixed, and prefixed Egyptian number variants to prevent duplicate profiles
         normalized = _normalize_egyptian_phone(phone)
-        customer = Customer.query.filter(
-            (Customer.phone == phone)
-            | (Customer.phone == normalized)
-            | (Customer.phone == f"20{normalized}")
-            | (Customer.phone == f"0{normalized}")
-        ).first()
+        candidate_phones = list(dict.fromkeys([phone, normalized, f"20{normalized}", f"0{normalized}"]))
+        customer = Customer.query.filter(Customer.phone.in_(candidate_phones)).first()
         if customer:
             # Update customer name or address if newly provided on subsequent orders
             if name and customer.name != name:
@@ -291,85 +286,25 @@ def find_or_create_customer(name: str, phone: str, address: str = "") -> dict:
 
 @_with_app_context
 def search_products(query: str, limit: int = 10) -> dict:
-    """
-    Search available products by name or category.
-    Supports common English synonyms that map to Arabic product terms.
-    Returns a list of matching products or an error.
-    """
+    """Search available products by name or category."""
     try:
-        q = (query or "").strip()
-        if not q:
-            # Return full catalog when query is empty, enabling complete menu presentations
-            results = (
-                Product.query.filter(Product.is_available == True)
-                .order_by(Product.category, Product.name)
-                .limit(limit)
-                .all()
-            )
-            items = [
-                {
-                    "id": p.id,
-                    "name": p.name,
-                    "category": p.category,
-                    "price": p.price,
-                    "combo_price": p.combo_price,
-                    "is_available": p.is_available,
-                    "description": p.description,
-                }
-                for p in results
-            ]
-            return {"ok": True, "items": items, "count": len(items)}
+        products = Product.query.filter(
+            Product.is_available.is_(True)
+        )
 
-        # Expand English queries with Arabic equivalents for common terms.
-        _ENGLISH_SYNONYMS = {
-            "chicken": "دجاج",
-            "frank": "فراخ",
-            "beef": "لحم",
-            "meat": "لحم",
-            "sandwich": "ساندوتش",
-            "meal": "وجبة",
-            "combo": "كومبو",
-            "cola": "كولا",
-            "coke": "كوكاكولا",
-            "fries": "بطاطس",
-            "water": "مياه",
-            "garlic": "ثومية",
-            "tahina": "طحينة",
-            "sauce": "صوص",
-            "drink": "مشروب",
-            "sides": "إضافات",
-            "addon": "إضافة",
-            "addons": "إضافات",
-            "shawarma": "شاورما",
-            "kfc": "كريسبي",
-            "crispy": "كريسبي",
-            "broasted": "بروستد",
-            "strips": "ستربس",
-            "strip": "ستربس",
-            "fatta": "فتة",
-            "rice": "أرز",
-            "basmati": "بسمتي",
-            "spicy": "حار",
-            "hot": "حار",
-            "pepper": "فلفل",
-            "حار": "حار",
-        }
-        expanded_terms = [q]
-        lowered = q.lower()
-        for english, arabic in _ENGLISH_SYNONYMS.items():
-            if english in lowered:
-                expanded_terms.append(arabic)
-
-        results = (
-            Product.query.filter(Product.is_available == True)
-            .filter(
+        if query and query.strip():
+            term = f"%{query.strip()}%"
+            products = products.filter(
                 db.or_(
-                    *[Product.name.ilike(f"%{term}%") | Product.category.ilike(f"%{term}%") for term in expanded_terms]
+                    Product.name.ilike(term),
+                    Product.category.ilike(term),
                 )
             )
-            .limit(limit)
-            .all()
-        )
+
+        results = products.order_by(
+            Product.category, Product.name
+        ).limit(limit).all()
+
         items = [
             {
                 "id": p.id,
@@ -382,67 +317,40 @@ def search_products(query: str, limit: int = 10) -> dict:
             }
             for p in results
         ]
+
         return {"ok": True, "items": items, "count": len(items)}
+
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
 @_with_app_context
 def recommend_products(message: str, limit: int = 3) -> dict:
-    """
-    Simple recommendation helper based on actual product data.
-    Supports lightweight hints:
-    - budget mentions like '150 egp'
-    - spicy mentions like 'spicy'
-    - group mentions like 'for two'
-    """
+    """Recommend available products based on the user's message."""
     try:
-        text = (message or "").strip().lower()
-        budget = None
-        try:
-            import re
+        query = Product.query.filter(
+            Product.is_available.is_(True)
+        )
 
-            match = re.search(r"(\d{2,5})\s*egp", text)
-            if match:
-                budget = float(match.group(1))
-        except Exception:
-            budget = None
+        text = (message or "").lower()
 
-        query = Product.query.filter(Product.is_available == True)
-        # Filter for spicy dishes if the user specifically requests hot or spicy food
-        if "spicy" in text or "حار" in text:
-            query = query.filter(
-                (Product.name.ilike("%spicy%"))
-                | (Product.description.ilike("%spicy%"))
-                | (Product.name.ilike("%حار%"))
-                | (Product.description.ilike("%حار%"))
+        # Extract budget, e.g. "150 egp"
+        import re
+        match = re.search(r"(\d{2,5})\s*egp", text)
+        budget = float(match.group(1)) if match else None
+
+        products = query.all()
+
+        if budget is not None:
+            products = [p for p in products if p.price <= budget]
+
+        # Prioritize meals
+        products.sort(
+            key=lambda p: (
+                (p.category or "").lower() != "meals",
+                p.price,
             )
-        results = list(query.all())
+        )
 
-        # Score candidates based on budget limits, meal category priority, and spice preferences
-        scored = []
-        for p in results:
-            score = float(_meal_priority(p))
-            price = p.price
-
-            # Exclude items exceeding explicit customer budget (e.g. 'under 150 egp')
-            if budget is not None:
-                if price > budget:
-                    continue
-                score += 1.0
-
-            if "spicy" in text or "حار" in text:
-                if _matches_spicy(p):
-                    score += 2.0
-
-            # Prioritize full meal items for hungry/lunch/dinner intents over small sides or drinks
-            if any(k in text for k in ("lunch", "dinner", "meal", "غداء", "عشاء", "وجبة", "جوعان", "hungry")):
-                if (p.category or "").lower() == "meals":
-                    score += 3.0
-
-            scored.append((score, p))
-
-        # Sort highest score first, breaking ties by lowest price to offer maximum value
-        scored.sort(key=lambda x: (-x[0], x[1].price))
         items = [
             {
                 "id": p.id,
@@ -453,85 +361,71 @@ def recommend_products(message: str, limit: int = 3) -> dict:
                 "is_available": p.is_available,
                 "description": p.description,
             }
-            for _, p in scored[:limit]
+            for p in products[:limit]
         ]
+
         return {"ok": True, "items": items, "count": len(items)}
+
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
 @_with_app_context
 def query_price_info(message: str) -> dict:
-    """
-    Deterministic calculation for menu price questions:
-    - cheapest meal / أرخص وجبة
-    - most expensive meal / أغلى وجبة
-    - meals under X EGP / وجبات أقل من X
-    - price of each meal / أسعار كل الوجبات
-    """
+    """Answer basic meal price questions."""
     try:
-        text = (message or "").strip().lower()
-        # Query Meals ordered by price asc to reliably answer mathematical superlative queries without LLM guessing
-        meals = Product.query.filter(Product.is_available == True, Product.category == "Meals").order_by(Product.price.asc()).all()
+        text = (message or "").lower()
+
+        meals = Product.query.filter(
+            Product.is_available.is_(True),
+            Product.category == "Meals",
+        ).order_by(Product.price).all()
+
         if not meals:
-            return {"ok": False, "error": "No available meals found in the menu."}
+            return {"ok": False, "error": "No available meals found."}
 
-        # Check for threshold like 'under 200 egp' or 'less than 200'
         import re
-        under_match = re.search(r"(?:under|less than|أقل من|تحت)\s*(\d{2,5})", text)
-        if under_match:
-            threshold = float(under_match.group(1))
-            matched_meals = [m for m in meals if m.price <= threshold]
-            lines = [f"### 💰 Meals Under {threshold:.0f} EGP\n"]
-            if not matched_meals:
-                lines.append(f"There are currently no meals under {threshold:.0f} EGP.")
-            else:
-                for m in matched_meals:
-                    lines.append(f"* **{m.name}** — {m.price:.0f} EGP *(Combo upgrade: +{m.combo_price:.0f} EGP)*")
-            return {"ok": True, "type": "threshold", "text": "\n".join(lines), "items": [m.to_dict() for m in matched_meals]}
 
-        if any(k in text for k in ["cheapest", "ارخص", "أرخص"]):
-            min_price = meals[0].price
-            cheapest = [m for m in meals if m.price == min_price]
-            lines = ["### 🏷️ Cheapest Meal Option\n"]
-            for m in cheapest:
-                lines.append(f"* **{m.name}** — {m.price:.0f} EGP *(Combo upgrade: +{m.combo_price:.0f} EGP for fries and drink)*")
-            return {"ok": True, "type": "cheapest", "text": "\n".join(lines), "items": [m.to_dict() for m in cheapest]}
+        match = re.search(
+            r"(?:under|less than|أقل من|تحت)\s*(\d{2,5})", text
+        )
 
-        if any(k in text for k in ["most expensive", "highest", "اغلى", "أغلى"]):
-            max_price = max(m.price for m in meals)
-            expensive = [m for m in meals if m.price == max_price]
-            lines = ["### 👑 Most Premium Meal Option\n"]
-            for m in expensive:
-                lines.append(f"* **{m.name}** — {m.price:.0f} EGP *(Combo upgrade: +{m.combo_price:.0f} EGP)*")
-            return {"ok": True, "type": "most_expensive", "text": "\n".join(lines), "items": [m.to_dict() for m in expensive]}
+        if match:
+            budget = float(match.group(1))
+            results = [m for m in meals if m.price <= budget]
+            title = f"Meals Under {budget:.0f} EGP"
 
-        # Price of each meal / all meal prices
-        if any(k in text for k in ["price of each", "all meal prices", "سعر كل", "أسعار الوجبات"]):
-            lines = ["### 🍗 Prices of All Meals\n"]
-            for m in meals:
-                lines.append(f"* **{m.name}** — {m.price:.0f} EGP *(Combo: +{m.combo_price:.0f} EGP)*")
-            return {"ok": True, "type": "all_prices", "text": "\n".join(lines), "items": [m.to_dict() for m in meals]}
+        elif any(word in text for word in ["cheapest", "أرخص", "ارخص"]):
+            results = [m for m in meals if m.price == meals[0].price]
+            title = "Cheapest Meals"
 
-        return {"ok": False, "error": "Not a specific price comparison query."}
+        elif any(word in text for word in ["most expensive", "highest", "أغلى", "اغلى"]):
+            results = [m for m in meals if m.price == meals[-1].price]
+            title = "Most Expensive Meals"
+
+        elif any(word in text for word in ["price of each", "all meal prices", "سعر كل", "أسعار الوجبات"]):
+            results = meals
+            title = "All Meal Prices"
+
+        else:
+            return {"ok": False, "error": "Not a specific price query."}
+
+        lines = [f"### {title}\n"]
+
+        if not results:
+            lines.append("No meals match your budget.")
+        else:
+            for m in results:
+                lines.append(
+                    f"* **{m.name}** — {m.price:.0f} EGP "
+                    f"(Combo: +{m.combo_price:.0f} EGP)"
+                )
+
+        return {
+            "ok": True,
+            "type": "price_query",
+            "text": "\n".join(lines),
+            "items": [m.to_dict() for m in results],
+        }
+
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
-
-def _matches_spicy(product: Product) -> bool:
-    spicy_signals = ["spicy", "حار", "hot", "pepper"]
-    text = " ".join(
-        [
-            (product.name or ""),
-            (product.description or ""),
-            (product.category or ""),
-        ]
-    ).lower()
-    return any(signal in text for signal in spicy_signals)
-
-def _meal_priority(product: Product) -> int:
-    category = (product.category or "").lower()
-    name = (product.name or "").lower()
-    if any(key in category for key in ["meal", "sandwich", "chicken", "shawarma", "pasta", "rice"]):
-        return 2
-    if any(key in category for key in ["drink", "side", "addon", "sauce"]):
-        return 0
-    return 1

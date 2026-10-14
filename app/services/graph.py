@@ -33,85 +33,97 @@ class AgentState(TypedDict, total=False):
     tool_result: dict
 
 def _format_meal_includes(desc: str) -> str:
-    """Extract a clean, concise comma-separated list of items included in a meal."""
+    """Format meal ingredients as a comma-separated list."""
     if not desc:
         return ""
+
     translations = {
         "ورك فرخة بروستد": "Broasted chicken thigh",
         "نصف فرخة بروستد": "Half broasted chicken",
         "ثلاث قطع ستربس": "Three strips pieces",
         "خمس قطع ستربس": "Five strips pieces",
-        "بطاطس": "fries",
-        "خبز": "bread",
-        "ثومية صغيرة": "garlic dip",
-        "ثومية": "garlic dip",
-        "كاتشب": "ketchup",
-        "كول سلو": "coleslaw",
+        "بطاطس": "Fries",
+        "خبز": "Bread",
+        "ثومية صغيرة": "Garlic dip",
+        "ثومية": "Garlic dip",
+        "كاتشب": "Ketchup",
+        "كول سلو": "Coleslaw",
         "رز بسمتي": "Basmati rice",
         "أرز بسمتي": "Basmati rice",
-        "ستربس": "strips",
+        "ستربس": "Strips",
     }
-    raw_lines = [ln.strip().lstrip("-*•").strip() for ln in desc.splitlines() if ln.strip()]
-    items = [ln for ln in raw_lines if not any(w in ln for w in ("تحتوي على", "يحتوي على", "وجبة"))]
-    if not items:
-        clean = desc.replace("\n", " ").strip()
-        for pfx in (
-            "وجبة ربع فرخة بروستد تحتوي على:", "وجبة ستربس 3 قطع تحتوي على:",
-            "وجبة ستربس 5 قطع تحتوي على:", "وجبة بريك تحتوي على:",
-            "الفتة تحتوي على:", "البسمتيو يحتوي على:",
-        ):
-            clean = clean.replace(pfx, "").strip()
-        items = [i.strip() for i in clean.split("-") if i.strip()]
-    cleaned_items = [translations.get(it.strip(" :-"), it.strip(" :-")) for it in items if it.strip(" :-")]
-    return ", ".join(cleaned_items) if cleaned_items else desc.replace("\n", " ").strip()
+
+    items = []
+    for line in desc.splitlines():
+        item = line.strip().lstrip("-*• ").strip()
+
+        if item and not any(word in item for word in ["تحتوي على", "يحتوي على", "وجبة"]):
+            items.append(translations.get(item.strip(" :-"), item.strip(" :-")))
+
+    return ", ".join(items) if items else desc.replace("\n", " ").strip()
 
 def _format_menu_grouped(items: list[dict]) -> str:
-    """Format menu products cleanly grouped by category with EGP prices and combo rules."""
-    category_order = ["Meals", "Add-ons", "Sauces", "Drinks", "Extras"]
-    category_titles = {
-        "Meals": "🍗 Meals",
-        "Add-ons": "➕ Add-ons",
-        "Sauces": "🥫 Sauces",
-        "Drinks": "🥤 Drinks",
-        "Extras": "🍟 Extras",
+    """Format menu items grouped by category."""
+    order = ["Meals", "Add-ons", "Sauces", "Drinks", "Extras"]
+    emojis = {
+        "Meals": "🍗", "Add-ons": "➕", "Sauces": "🥫",
+        "Drinks": "🥤", "Extras": "🍟",
     }
-    grouped: dict[str, list[dict]] = {}
+
+    grouped = {}
     for item in items:
-        cat = item.get("category", "Extras")
-        grouped.setdefault(cat, []).append(item)
+        category = item.get("category") or "Extras"
+        grouped.setdefault(category, []).append(item)
 
-    sections = ["### 📋 Our Menu\n"]
-    ordered_cats = [c for c in category_order if c in grouped] + [c for c in grouped if c not in category_order]
-    for cat in ordered_cats:
-        title = category_titles.get(cat, f"📦 {cat}")
-        sections.append(f"#### {title}\n")
-        if cat == "Meals":
-            for p in grouped[cat]:
-                name = p.get("name", "")
-                price = p.get("price", 0.0)
-                combo = p.get("combo_price", 0.0)
-                includes = _format_meal_includes(p.get("description") or "")
-                sections.append(f"**{name} — {price:.0f} EGP**")
+    sections = ["### 📋 Our Menu"]
+
+    categories = [c for c in order if c in grouped]
+    categories += [c for c in grouped if c not in order]
+
+    for category in categories:
+        sections.append(f"\n#### {emojis.get(category, '📦')} {category}")
+
+        for item in grouped[category]:
+            name = item.get("name", "")
+            price = item.get("price") or 0
+            sections.append(f"* **{name} — {price:.0f} EGP**" if category == "Meals"
+                            else f"* **{name}** — {price:.0f} EGP")
+
+            if category == "Meals":
+                includes = _format_meal_includes(item.get("description") or "")
+                combo = item.get("combo_price") or 0
+
                 if includes:
-                    sections.append(f"* Includes: {includes}.")
-                if combo and combo > 0:
-                    sections.append(f"* Combo upgrade: +{combo:.0f} EGP for fries and a drink.")
-                sections.append("")
-        else:
-            for p in grouped[cat]:
-                name = p.get("name", "")
-                price = p.get("price", 0.0)
-                sections.append(f"* **{name}** — {price:.0f} EGP")
-            sections.append("")
+                    sections.append(f"  * Includes: {includes}.")
+                if combo > 0:
+                    sections.append(
+                        f"  * Combo upgrade: +{combo:.0f} EGP for fries and a drink."
+                    )
 
-    return "\n".join(sections).strip()
+    return "\n".join(sections)
+
+def _format_product_item_lines(items: list[Any]) -> list[str]:
+    """Format structured product details consistently across recommendations, meal listings, and queries."""
+    lines = []
+    for item in items:
+        name = getattr(item, "name", None) or (item.get("name") if isinstance(item, dict) else "")
+        price = getattr(item, "price", 0.0) if hasattr(item, "price") else (item.get("price", 0.0) if isinstance(item, dict) else 0.0)
+        combo = getattr(item, "combo_price", 0.0) if hasattr(item, "combo_price") else (item.get("combo_price", 0.0) if isinstance(item, dict) else 0.0)
+        cat = getattr(item, "category", "") if hasattr(item, "category") else (item.get("category", "") if isinstance(item, dict) else "")
+        desc = getattr(item, "description", "") if hasattr(item, "description") else (item.get("description", "") if isinstance(item, dict) else "")
+        if cat == "Meals":
+            includes = _format_meal_includes(desc or "")
+            lines.append(f"**{name} — {price:.0f} EGP**")
+            if includes:
+                lines.append(f"* Includes: {includes}.")
+            if combo and combo > 0:
+                lines.append(f"* Combo upgrade: +{combo:.0f} EGP for fries and a drink.")
+            lines.append("")
+        else:
+            lines.append(f"* **{name}** ({cat}) — {price:.0f} EGP")
+    return lines
 
 def _route_intent(message: str, session_id: str = "") -> str:
-    """
-    Two-path router:
-    - 'ordering': Placing an order, giving order details, confirmation, cancel, or tracking.
-    - 'information': All customer inquiries (menu, recommendations, prices, policies, RAG).
-    """
     text = (message or "").strip().lower()
 
     # 1. Order tracking: route to ordering so track_order tool can look up DB status
@@ -130,18 +142,18 @@ def _route_intent(message: str, session_id: str = "") -> str:
 
     # Inspect active draft to contextualize short answers (e.g., "no", "yes", "cash")
     draft = get_draft(session_id) if session_id else {}
-    has_active_draft = bool(draft.get("items") and draft.get("stage") != "confirmed")
+    has_active_draft = bool((draft.get("items") or draft.get("order_type")) and draft.get("stage") != "confirmed")
 
     # 3. Upsell declines or accepts: prevent short answers like "no thanks" from routing to general info
     decline_signals = ["no", "no thanks", "no thank you", "none", "لا", "لا شكرا", "لا شكراً", "لا تمام", "تمام كده", "مش عايز", "مش عاوز", "كفاية", "بس كده"]
     combo_signals = ["make it combo", "make them combo", "add combo", "combo please", "upgrade to combo", "خليهم كومبو", "مع كومبو", "ضيف كومبو", "نعم كومبو", "عايز كومبو", "عاوز كومبو"]
     if has_active_draft:
         clean_text = text.strip(" .!?,")
-        if (clean_text in decline_signals or any(clean_text == s for s in decline_signals) or any(clean_text.startswith(s + " ") for s in ["no", "no thanks", "لا", "لا شكرا"])) or any(sig in text for sig in combo_signals):
+        if (clean_text in decline_signals or any(clean_text.startswith(s + " ") for s in ["no", "no thanks", "لا", "لا شكرا"])) or any(sig in text for sig in combo_signals):
             return "ordering"
 
     # 4. Cancellation attempt: route to ordering where policy notice or draft clearing occurs
-    if any(sig in text for sig in ("cancel", "إلغاء")):
+    if any(sig in text for sig in ("cancel", "إلغاء", "الغاء", "الغي", "كنسل")):
         return "ordering"
 
     # Detect informational signals (questions about policies, menu, prices, recommendations, branches, hours)
@@ -170,17 +182,21 @@ def _route_intent(message: str, session_id: str = "") -> str:
     ]
     has_fulfillment_detail = any(w in text for w in fulfillment_words)
 
+    # Menu item mentions without question mark or price words indicate intent to add food
+    menu_item_signals = (
+        "بسمتيو", "بروستد", "ستربس", "بريك", "فتة", "بطاطس", "أرز", "رز", "ثومية", "كول سلو",
+        "باربكيو", "شيدر", "رانش", "سويت تشيلي", "مشروب", "بيبسي", "مياه", "شريطي",
+        "basmatio", "basmetio", "cheddar", "cheder", "strips", "broasted", "fatta", "fries", "coleslaw"
+    )
+    has_menu_item = any(item in text for item in menu_item_signals)
+
     # Check for phone number pattern or delivery address keyword
     has_phone = bool(re.search(r"(?:(?:\+?20)|0)?1[0125]\d{8}\b", text))
     has_address = bool("شارع" in text or "street" in text or "st." in text)
 
-    # 4. If message has explicit ordering action or fulfillment details
-    if has_order_action or has_phone or (has_fulfillment_detail and not is_explicit_info_query):
+    # 4. If message has explicit ordering action, menu item, or fulfillment details
+    if has_order_action or has_phone or ((has_fulfillment_detail or has_menu_item) and not is_explicit_info_query):
         return "ordering"
-
-    # If user provided a fulfillment detail (like "delivery" or "cash") but combined with a question:
-    # e.g., "Do you have delivery to Nasr City?" -> is_explicit_info_query is True -> routes to information!
-    # e.g., "delivery please" -> has_fulfillment_detail is True, is_explicit_info_query is False -> routes to ordering!
 
     # 5. Active draft continuation
     if has_active_draft:
@@ -230,21 +246,7 @@ def rag_node(state: AgentState) -> AgentState:
     if any(sig in text_lower for sig in rec_signals):
         rec_result = recommend_products(message, limit=3)
         if rec_result.get("ok") and rec_result.get("items"):
-            lines = ["### 🌟 Recommended Options\n"]
-            for item in rec_result["items"]:
-                price = item.get("price", 0.0)
-                combo = item.get("combo_price", 0.0)
-                cat = item.get("category", "")
-                if cat == "Meals":
-                    includes = _format_meal_includes(item.get("description") or "")
-                    lines.append(f"**{item['name']} — {price:.0f} EGP**")
-                    if includes:
-                        lines.append(f"* Includes: {includes}.")
-                    if combo and combo > 0:
-                        lines.append(f"* Combo upgrade: +{combo:.0f} EGP for fries and a drink.")
-                    lines.append("")
-                else:
-                    lines.append(f"* **{item['name']}** ({cat}) — {price:.0f} EGP")
+            lines = ["### 🌟 Recommended Options\n"] + _format_product_item_lines(rec_result["items"])
             pieces.append("\n".join(lines).strip())
             state["context"] = "\n\n".join(pieces)
             state["tool_name"] = "recommend_products"
@@ -254,15 +256,7 @@ def rag_node(state: AgentState) -> AgentState:
     # 3. Specific 'All Meals' query: formatted from active DB records to reflect real-time stock
     if any(kw in text_lower for kw in ("all meals", "available meals", "what meals", "list meals", "show meals", "الوجبات", "كل الوجبات")):
         meals = Product.query.filter(Product.category == "Meals", Product.is_available == True).order_by(Product.price.asc()).all()
-        lines = ["### 🍗 Available Meals\n"]
-        for m in meals:
-            includes = _format_meal_includes(m.description or "")
-            lines.append(f"**{m.name} — {m.price:.0f} EGP**")
-            if includes:
-                lines.append(f"* Includes: {includes}.")
-            if m.combo_price and m.combo_price > 0:
-                lines.append(f"* Combo upgrade: +{m.combo_price:.0f} EGP for fries and a drink.")
-            lines.append("")
+        lines = ["### 🍗 Available Meals\n"] + _format_product_item_lines(meals)
         pieces.append("\n".join(lines).strip())
         state["context"] = "\n\n".join(pieces)
         state["tool_name"] = "list_meals"
@@ -280,32 +274,32 @@ def rag_node(state: AgentState) -> AgentState:
             state["tool_result"] = {"ok": True, "count": product_results.get("count", 0)}
             return state
 
-    # 5. Semantic RAG retrieval from ChromaDB: filters by score <= 0.72 to drop irrelevant noise
+    # 5. Semantic RAG retrieval from ChromaDB: filters by score <= 0.80 to capture relevant matches
     hits = retrieve(message, top_k=4)
-    relevant_hits = [h for h in hits if h.get("score") is None or h.get("score") <= 0.72]
+    relevant_hits = [h for h in hits if h.get("score") is None or h.get("score") <= 0.80]
     for hit in relevant_hits:
         content = hit.get("content") or ""
         if content.strip():
             pieces.append(content.strip())
 
+    # Detect questions about ordering capability (e.g. "can I order from here?", "ممكن اطلب من هنا؟")
+    order_inquiry_patterns = [
+        r"\b(?:can\s*i\s*order|how\s*(?:can\s*i|do\s*i|to)\s*order|order\s*(?:from\s*here|online|here)|is\s*ordering\s*available)\b",
+        r"(?:ممكن\s*اطلب|اقدر\s*اطلب|ينفع\s*اطلب|عايز\s*اطلب\s*من\s*هنا|عاوز\s*اطلب\s*من\s*هنا|الطلب\s*متاح)",
+    ]
+    if any(re.search(pat, text_lower) for pat in order_inquiry_patterns):
+        ordering_info = (
+            "### 🍽️ Ordering Availability:\n"
+            "* Yes, ordering is available! Customers can place food orders directly through this chat.\n"
+            "* Service options: Delivery (all Cairo areas, 30-45 minutes, 25 EGP delivery fee, Cash on delivery), Pickup (from our branches), or Dine-in.\n"
+            "* Customers can view our menu or tell us the items they would like to order."
+        )
+        pieces.append(ordering_info)
+
     # Augment with live structured product details if query matches products in SQLite (handles custom DB items)
     product_results = search_products(message, limit=3)
     if product_results.get("ok") and product_results.get("items"):
-        p_lines = []
-        for item in product_results["items"]:
-            price = item.get("price", 0.0)
-            combo = item.get("combo_price", 0.0)
-            cat = item.get("category", "")
-            if cat == "Meals":
-                includes = _format_meal_includes(item.get("description") or "")
-                p_lines.append(f"**{item['name']} — {price:.0f} EGP**")
-                if includes:
-                    p_lines.append(f"* Includes: {includes}.")
-                if combo and combo > 0:
-                    p_lines.append(f"* Combo upgrade: +{combo:.0f} EGP for fries and a drink.")
-                p_lines.append("")
-            else:
-                p_lines.append(f"* **{item['name']}** ({cat}) — {price:.0f} EGP")
+        p_lines = _format_product_item_lines(product_results["items"])
         if p_lines:
             pieces.append("\n".join(p_lines).strip())
 
@@ -319,34 +313,55 @@ def rag_node(state: AgentState) -> AgentState:
     return state
 
 def _is_confirmation_intent(text: str, draft: dict[str, Any]) -> bool:
-    """Check if message represents an order confirmation intent."""
+    """
+    Check if message represents an unambiguous order confirmation intent.
+    Strictly blocks confirmations containing negations, modifications, questions, or conditional words.
+    """
     t = (text or "").strip().lower()
     if not t:
         return False
 
-    # Explicit confirmation keywords always trigger confirmation attempt
-    explicit_confirm = [
-        "confirm", "confirm order", "confirm last order", "confirm my order", "place order", "place the order", "place my order",
-        "submit order", "submit my order", "complete order", "finish order",
-        "yes confirm", "yes please place", "yes place order",
-        "تأكيد", "أكد", "اعتمد", "سجل الطلب", "نفذ الطلب", "أكد الطلب", "اكد الطلب", "اعتمد الطلب", "تأكيد الطلب", "أكد أخر طلب", "اكد اخر طلب"
+    # 1. Immediate Guards: Any question mark, negation, or modification intent blocks confirmation
+    if "?" in t or "؟" in t:
+        return False
+
+    # Negation indicators (English & Arabic) e.g. "don't confirm", "not yet", "مش عايز اكد"
+    negation_patterns = [
+        r"\b(?:don'?t|do not|not|never|no|stop|wait|hold|delay)\b",
+        r"(?:مش|لا|بلاش|متأكدش|متاكدش|ما تأكدش|ما تاكدش|استنى|استني|لحظة|ثانية|مهلا|توقف)\b",
     ]
-    if any(sig in t for sig in explicit_confirm):
+    if any(re.search(pat, t) for pat in negation_patterns):
+        return False
+
+    # Modification or conditional indicators (e.g. "okay, but change my address", "تمام بس عدل")
+    modification_patterns = [
+        r"\b(?:but|however|change|modify|update|remove|delete|cancel|replace|instead|except)\b",
+        r"(?:بس|لكن|غير|عدل|احذف|شيل|امسح|بدل|ما عدا|إلا|الا)\b",
+    ]
+    if any(re.search(pat, t) for pat in modification_patterns):
+        return False
+
+    # 2. Explicit confirmation phrases
+    explicit_confirm_patterns = [
+        r"\b(?:confirm(?:ed|ing)?(?:\s+(?:the|my|last)?\s*order)?|place\s+(?:the|my)?\s*order|submit\s+(?:the|my)?\s*order|complete\s+(?:the|my)?\s*order|finish\s+(?:the|my)?\s*order)\b",
+        r"(?:تأكيد|أكد|اكد|اعتمد|سجل|نفذ)(?:\s+(?:الطلب|الأوردر|الاوردر|أخر طلب|اخر طلب))?",
+    ]
+    if any(re.search(pat, t) for pat in explicit_confirm_patterns):
         return True
 
-    # Contextual confirmation: affirmative words only count when draft is ready and awaiting confirmation
+    # 3. Contextual affirmative tokens: only valid when draft is ready and awaiting confirmation
     is_awaiting = draft.get("stage") == "awaiting_confirmation"
     has_items = bool(draft.get("items"))
     missing = get_missing_fields(draft) if has_items else ["items"]
+
     if is_awaiting or (has_items and not missing):
-        words = set(re.findall(r"[\w]+", t))
         affirmative_tokens = {
             "yes", "yeah", "yep", "sure", "ok", "okay", "proceed",
-            "تمام", "أيوة", "ايوة", "نعم", "موافق", "ماشي", "اه", "أه", "أكيد", "اكيد"
+            "تمام", "أيوة", "ايوة", "نعم", "موافق", "ماشي", "اه", "أه", "أكيد", "اكيد",
         }
-        if any(w in affirmative_tokens for w in words):
-            return True
-        if any(t.startswith(prefix) for prefix in ("yes", "ok", "okay", "تمام", "أيوة", "ايوة", "نعم", "موافق", "اه", "أه")):
+        words = set(re.findall(r"[\w]+", t))
+        # Match short affirmative responses (under 5 words) that contain an affirmative token
+        if any(w in affirmative_tokens for w in words) and len(words) <= 4:
             return True
 
     return False
@@ -489,10 +504,29 @@ def order_tool_node(state: AgentState) -> AgentState:
             state["context"] = resp_text
             return state
 
-    # 3. Check for Cancellation attempt: placed orders cannot be cancelled once preparation begins
-    if any(k in text_lower for k in ("cancel", "إلغاء")):
+    # 3. Check for Cancellation: distinguish policy inquiries from explicit cancellation commands
+    is_cancel_mention = any(k in text_lower for k in ("cancel", "إلغاء", "الغاء", "الغي", "كنسل"))
+    if is_cancel_mention:
         order_code = _extract_order_code(message)
-        if order_code or draft.get("confirmed_order_code"):
+        # Check if this is an informational question or inquiry regarding cancellation policy
+        is_policy_inquiry = (
+            any(w in text_lower for w in ("policy", "rules", "can i", "could i", "how", "what", "fee", "fees", "سياسة", "شروط", "هل", "ممكن", "ينفع", "رسوم", "لو حبيت"))
+            or "?" in text_lower
+            or "؟" in text_lower
+        )
+        if is_policy_inquiry:
+            # Policy inquiries must NEVER clear an active draft!
+            resp_text = (
+                "ℹ️ **Cancellation Policy**:\n"
+                "- Once an order has been confirmed and placed, it cannot be cancelled as preparation begins immediately in the kitchen.\n"
+                "- You can freely modify or cancel an unconfirmed draft at any time before placing your order."
+            )
+            state["tool_name"] = "cancellation_policy"
+            state["tool_result"] = {"ok": True, "action": "policy_info"}
+            state["response"] = resp_text
+            state["context"] = resp_text
+            return state
+        elif order_code or draft.get("confirmed_order_code"):
             resp_text = (
                 "❌ **Order Cancellation is Not Supported**: "
                 "Once an order has been confirmed and placed, it cannot be cancelled as preparation begins immediately in the kitchen. "
@@ -504,6 +538,7 @@ def order_tool_node(state: AgentState) -> AgentState:
             state["context"] = resp_text
             return state
         else:
+            # Explicit command to cancel or clear an unconfirmed draft
             clear_draft(session_id)
             resp_text = "Your unconfirmed draft order has been cleared."
             state["tool_name"] = "clear_draft"
@@ -514,6 +549,17 @@ def order_tool_node(state: AgentState) -> AgentState:
 
     # 4. Check for Confirmation: validate completeness before committing transaction to database
     if _is_confirmation_intent(message, draft):
+        if not draft.get("items"):
+            # History recovery safeguard: if items were selected earlier in this session, restore them
+            try:
+                from app.models.chat import ChatMessage
+                prior_msgs = ChatMessage.query.filter_by(session_id=session_id, role="user").order_by(ChatMessage.created_at.asc()).all()
+                for pm in prior_msgs:
+                    parse_user_entities(session_id, pm.content)
+                draft = get_draft(session_id)
+            except Exception:
+                pass
+
         if not draft.get("items"):
             result = {"ok": False, "error": "Cannot confirm empty order."}
             state["tool_name"] = "confirm_order"
@@ -678,34 +724,33 @@ def llm_node(state: AgentState) -> AgentState:
     return state
 
 def build_graph():
-    """
-    Builds the simplified 2-path LangGraph state machine:
-    Router -> [rag OR order_tool] -> llm -> END
-    """
-    workflow = StateGraph(AgentState)
-    workflow.add_node("router", router_node)
-    workflow.add_node("rag", rag_node)
-    workflow.add_node("order_tool", order_tool_node)
-    workflow.add_node("llm", llm_node)
+    graph = StateGraph(AgentState)
 
-    workflow.set_entry_point("router")
-    workflow.add_conditional_edges(
+    graph.add_node("router", router_node)
+    graph.add_node("rag", rag_node)
+    graph.add_node("order", order_tool_node)
+    graph.add_node("llm", llm_node)
+
+    graph.set_entry_point("router")
+
+    graph.add_conditional_edges(
         "router",
-        lambda state: state.get("intent", "information"),
+        lambda state: state["intent"],
         {
             "information": "rag",
-            "ordering": "order_tool",
+            "ordering": "order",
         },
     )
-    workflow.add_edge("rag", "llm")
-    workflow.add_edge("order_tool", "llm")
-    workflow.add_edge("llm", END)
-    return workflow.compile()
+
+    graph.add_edge("rag", "llm")
+    graph.add_edge("order", "llm")
+    graph.add_edge("llm", END)
+
+    return graph.compile()
 
 _graph = build_graph()
 
 def run(session_id: str, message: str) -> dict:
-    """Entry point invoked by Flask admin_chat route."""
     return _graph.invoke({
         "session_id": session_id,
         "message": message,
